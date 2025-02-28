@@ -1,2 +1,3 @@
-mod dft;
-mod fft;
+mod app;
+pub mod dft;
+pub mod fft;

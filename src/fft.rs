@@ -28,8 +28,17 @@ impl FFT {
         Self::in_place_transform(&mut data, self.direction, scale);
         data
     }
+    pub fn FFT(data: &mut [Complex<f32>], direction: TransformType, scale: bool) -> Result<(), ()> {
+        Self::rearrange(data);
+        if !data.len().is_power_of_two() {
+            return Err(());
+        } else {
+            Self::in_place_transform(data, direction, scale);
+            Ok(())
+        }
+    }
 
-    pub fn in_place_transform(data: &mut [Complex<f32>], direction: TransformType, scale: bool) {
+    fn in_place_transform(data: &mut [Complex<f32>], direction: TransformType, scale: bool) {
         let len = data.len();
         let mut step = 1;
         while step < len {
