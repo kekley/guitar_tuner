@@ -1,14 +1,21 @@
-use std::task::Context;
-
-use anyhow::Ok;
+use anyhow::{anyhow, Ok};
+use cpal::{
+    traits::{DeviceTrait, HostTrait},
+    FromSample, Sample, SampleFormat, StreamConfig, ALL_HOSTS,
+};
 use imgui::Context;
-use imgui_glow_renderer::glow;
+use imgui_glow_renderer::{
+    glow::{self, HasContext, COLOR_BUFFER_BIT},
+    AutoRenderer,
+};
+use imgui_sdl2_support::SdlPlatform;
 use sdl2::{
-    video::{GLContext, Window},
-    Sdl, VideoSubsystem,
+    event::{self, Event},
+    video::{gl_attr::GLAttr, GLContext, Window},
+    EventPump, Sdl, VideoSubsystem,
 };
 
-pub const WINDOW_TITLE: &str = "dodge left dodge right";
+pub const DEFAULT_WINDOW_TITLE: &str = "dodge left dodge right";
 pub const DEFAULT_WIDTH: usize = 800;
 pub const DEFAULT_HEIGHT: usize = 600;
 
@@ -18,49 +25,46 @@ unsafe fn get_glow_context(window: &Window) -> glow::Context {
     }
 }
 
-fn init_app() -> anyhow::Result<()> {
-    let sdl = initialize_sdl()?;
-    let window = create_window(sdl_video)?;
-
-    let gl_context = create_opengl_context(&window)?;
-
-    //enable v-sync
-    window.subsystem().gl_set_swap_interval(1)?;
-
-    let glow = unsafe { get_glow_context(&window) };
-
-    let imgui = init_imgui();
-    todo!()
-}
-
-fn initialize_sdl() -> anyhow::Result<Sdl> {
-    let sdl = sdl2::init()?;
-    let video_subsystem = sdl.video()?;
+fn initialize_sdl() -> anyhow::Result<(Sdl, VideoSubsystem)> {
+    let sdl = sdl2::init().map_err(|error| anyhow!(error))?;
+    let video_subsystem = sdl.video().map_err(|error| anyhow!(error))?;
 
     let gl_attr = video_subsystem.gl_attr();
 
     //opengl 3.3
     gl_attr.set_context_version(3, 3);
     gl_attr.set_context_profile(sdl2::video::GLProfile::Core);
+    Ok((sdl, video_subsystem))
 }
 
-fn create_window(sdl_video: &VideoSubsystem) -> anyhow::Result<Window> {
-    video_subsystem
-        .window(WINDOW_TITLE, DEFAULT_WIDTH, DEFAULT_HEIGHT)
+fn create_window(
+    sdl_video: &VideoSubsystem,
+    window_title: &str,
+    window_width: usize,
+    window_height: usize,
+) -> anyhow::Result<Window> {
+    let window = sdl_video
+        .window(window_title, window_width as u32, window_height as u32)
         .allow_highdpi()
         .opengl()
         .position_centered()
         .resizable()
-        .build()?
+        .build()?;
+
+    Ok(window)
 }
 
 fn create_opengl_context(window: &Window) -> anyhow::Result<GLContext> {
-    let context = window.gl_create_context()?;
-    window.gl_make_current(&context);
+    let context = window.gl_create_context().map_err(|error| anyhow!(error))?;
+    window
+        .gl_make_current(&context)
+        .map_err(|error| anyhow!(error))?;
     Ok(context)
 }
 
-fn init_imgui() -> anyhow::Result<Context> {
+fn init_imgui(
+    glow_context: glow::Context,
+) -> anyhow::Result<(imgui::Context, SdlPlatform, AutoRenderer)> {
     let mut imgui = imgui::Context::create();
 
     imgui.set_ini_filename(None);
@@ -70,5 +74,195 @@ fn init_imgui() -> anyhow::Result<Context> {
         .fonts()
         .add_font(&[imgui::FontSource::DefaultFontData { config: None }]);
 
-    imgui
+    let platform = SdlPlatform::new(&mut imgui);
+
+    let renderer = AutoRenderer::new(glow_context, &mut imgui)?;
+
+    Ok((imgui, platform, renderer))
+}
+
+#[derive(Debug, Default)]
+pub struct AppBuilder {
+    window_title: Option<String>,
+    window_width: Option<usize>,
+    window_height: Option<usize>,
+    vsync_enabled: Option<bool>,
+}
+impl AppBuilder {
+    pub fn window_title(self, title: &str) -> Self {
+        Self {
+            window_title: Some(title.to_owned()),
+            ..self
+        }
+    }
+    pub fn window_width(self, width: usize) -> Self {
+        Self {
+            window_width: Some(width),
+            ..self
+        }
+    }
+    pub fn window_height(self, height: usize) -> Self {
+        Self {
+            window_height: Some(height),
+            ..self
+        }
+    }
+    pub fn vsync_enabled(self, enabled: bool) -> Self {
+        Self {
+            vsync_enabled: Some(enabled),
+            ..self
+        }
+    }
+
+    pub fn build(self) -> anyhow::Result<App> {
+        let (sdl, video_subsystem) = initialize_sdl()?;
+        let window = create_window(
+            &video_subsystem,
+            &self
+                .window_title
+                .unwrap_or(DEFAULT_WINDOW_TITLE.to_string()),
+            self.window_width.unwrap_or(DEFAULT_WIDTH),
+            self.window_height.unwrap_or(DEFAULT_HEIGHT),
+        )?;
+
+        let gl_context = create_opengl_context(&window)?;
+
+        if self.vsync_enabled.unwrap_or(true) {
+            window
+                .subsystem()
+                .gl_set_swap_interval(1)
+                .map_err(|error| anyhow!(error))?;
+        }
+
+        let glow_context = unsafe { get_glow_context(&window) };
+
+        let (imgui_context, imgui_platform, imgui_renderer) = init_imgui(glow_context)?;
+
+        let event_pump = sdl.event_pump().map_err(|error| anyhow!(error))?;
+
+        let app = App {
+            sdl,
+            video_subsystem,
+            window,
+            gl_context,
+            imgui_context,
+            imgui_platform,
+            imgui_renderer,
+            event_pump,
+        };
+
+        Ok(app)
+    }
+}
+
+pub struct App {
+    sdl: Sdl,
+    video_subsystem: VideoSubsystem,
+
+    window: Window,
+    gl_context: GLContext,
+    imgui_context: imgui::Context,
+    imgui_platform: SdlPlatform,
+    imgui_renderer: AutoRenderer,
+    event_pump: EventPump,
+}
+
+impl App {
+    pub fn new() -> AppBuilder {
+        AppBuilder::default()
+    }
+
+    pub fn run(mut self) -> anyhow::Result<()> {
+        let App {
+            mut sdl,
+            mut video_subsystem,
+            mut window,
+            mut gl_context,
+            mut imgui_context,
+            mut imgui_platform,
+            mut imgui_renderer,
+            mut event_pump,
+        } = self;
+        let (window_size_x, window_size_y) = window.size();
+        let window_size_x = window_size_x as f32;
+        let window_size_y = window_size_y as f32;
+        let host = cpal::default_host();
+
+        let devices = host.input_devices()?.collect::<Vec<_>>();
+        let device_names = devices
+            .iter()
+            .map(|f| f.name().unwrap())
+            .collect::<Vec<_>>();
+        let name_refs = device_names.iter().map(|f| f).collect::<Vec<_>>();
+        let mut item = 0;
+        let mic = &devices[0];
+        let mut configs = mic.supported_input_configs()?;
+
+        let config = configs
+            .into_iter()
+            .find(|f| f.sample_format().is_float())
+            .unwrap()
+            .with_max_sample_rate()
+            .config();
+        let mut sample_buffer: [f32; 8192] = [0f32; 8192];
+
+        let stream = mic.build_input_stream(
+            &config,
+            move |data, _: &_| Self::write_input_data::<f32, f32>(data, &mut sample_buffer),
+            move |err| {
+                // react to errors here.
+            },
+            None,
+        );
+        'main: loop {
+            for event in event_pump.poll_iter() {
+                //event passed to imgui
+                imgui_platform.handle_event(&mut imgui_context, &event);
+
+                if let Event::Quit { .. } = event {
+                    break 'main;
+                }
+            }
+
+            imgui_platform.prepare_frame(&mut imgui_context, &window, &event_pump);
+
+            let ui = imgui_context.new_frame();
+
+            ///////////////////////////////////////////////
+            //ui code  goes here
+            ui.window("Input Devices")
+                .size(
+                    [window_size_x / 2.0, window_size_y / 2.0],
+                    imgui::Condition::Always,
+                )
+                .resizable(false)
+                .position([0.0, 0.0], imgui::Condition::Always)
+                .build(|| {
+                    ui.list_box("list box", &mut item, &name_refs, 7);
+                });
+
+            //////////////////////////////////////////////
+
+            let draw_data = imgui_context.render();
+
+            unsafe {
+                imgui_renderer.gl_context().clear(COLOR_BUFFER_BIT);
+            }
+
+            imgui_renderer
+                .render(draw_data)
+                .map_err(|error| anyhow!(error))?;
+
+            window.gl_swap_window();
+        }
+
+        unreachable!()
+    }
+    fn write_input_data<T, U>(input: &[T], buffer: &mut [f32])
+    where
+        T: Sample,
+        U: Sample + FromSample<T>,
+    {
+        for sample in input {}
+    }
 }

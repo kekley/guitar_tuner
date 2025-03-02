@@ -28,7 +28,7 @@ impl FFT {
         Self::in_place_transform(&mut data, self.direction, scale);
         data
     }
-    pub fn FFT(data: &mut [Complex<f32>], direction: TransformType, scale: bool) -> Result<(), ()> {
+    pub fn fft(data: &mut [Complex<f32>], direction: TransformType, scale: bool) -> Result<(), ()> {
         Self::rearrange(data);
         if !data.len().is_power_of_two() {
             return Err(());
