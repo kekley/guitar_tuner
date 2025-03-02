@@ -1,7 +1,14 @@
+use std::{
+    fmt::Debug,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
 use anyhow::{anyhow, Ok};
+use circular_buffer::CircularBuffer;
 use cpal::{
-    traits::{DeviceTrait, HostTrait},
-    FromSample, Sample, SampleFormat, StreamConfig, ALL_HOSTS,
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+    BufferSize, FromSample, Sample, SampleFormat, SampleRate, StreamConfig, ALL_HOSTS,
 };
 use imgui::Context;
 use imgui_glow_renderer::{
@@ -18,7 +25,7 @@ use sdl2::{
 pub const DEFAULT_WINDOW_TITLE: &str = "dodge left dodge right";
 pub const DEFAULT_WIDTH: usize = 800;
 pub const DEFAULT_HEIGHT: usize = 600;
-
+pub const BUFFER_SIZE: usize = 48000;
 unsafe fn get_glow_context(window: &Window) -> glow::Context {
     unsafe {
         glow::Context::from_loader_function(|s| window.subsystem().gl_get_proc_address(s) as _)
@@ -196,7 +203,10 @@ impl App {
         let name_refs = device_names.iter().map(|f| f).collect::<Vec<_>>();
         let mut item = 0;
         let mic = &devices[0];
-        let mut configs = mic.supported_input_configs()?;
+        let configs = mic.supported_input_configs()?;
+
+        configs.into_iter().for_each(|f| println!("{:?}", f));
+        let configs = mic.supported_input_configs()?;
 
         let config = configs
             .into_iter()
@@ -204,16 +214,20 @@ impl App {
             .unwrap()
             .with_max_sample_rate()
             .config();
-        let mut sample_buffer: [f32; 8192] = [0f32; 8192];
 
+        let sample_buffer = Arc::new(Mutex::new(CircularBuffer::<BUFFER_SIZE, f32>::new()));
+        let buffer_arc_clone = sample_buffer.clone();
         let stream = mic.build_input_stream(
             &config,
-            move |data, _: &_| Self::write_input_data::<f32, f32>(data, &mut sample_buffer),
+            move |data, callback_info| Self::write_input_data(data, &buffer_arc_clone),
             move |err| {
                 // react to errors here.
             },
             None,
-        );
+        )?;
+        println!("name: {}", mic.name()?);
+        stream.play()?;
+
         'main: loop {
             for event in event_pump.poll_iter() {
                 //event passed to imgui
@@ -227,7 +241,6 @@ impl App {
             imgui_platform.prepare_frame(&mut imgui_context, &window, &event_pump);
 
             let ui = imgui_context.new_frame();
-
             ///////////////////////////////////////////////
             //ui code  goes here
             ui.window("Input Devices")
@@ -238,7 +251,14 @@ impl App {
                 .resizable(false)
                 .position([0.0, 0.0], imgui::Condition::Always)
                 .build(|| {
+                    let lock = sample_buffer.clone();
+                    let mut lock = lock.lock().unwrap();
                     ui.list_box("list box", &mut item, &name_refs, 7);
+                    let a = ui
+                        .plot_lines("data", lock.make_contiguous())
+                        .scale_max(0.5)
+                        .scale_min(-0.5);
+                    a.build();
                 });
 
             //////////////////////////////////////////////
@@ -255,14 +275,24 @@ impl App {
 
             window.gl_swap_window();
         }
-
-        unreachable!()
+        Ok(())
     }
-    fn write_input_data<T, U>(input: &[T], buffer: &mut [f32])
-    where
-        T: Sample,
-        U: Sample + FromSample<T>,
-    {
-        for sample in input {}
+    fn write_input_data(input: &[f32], buffer: &Arc<Mutex<CircularBuffer<BUFFER_SIZE, f32>>>) {
+        let mut buffer = buffer.lock().unwrap();
+        (0..input.len()).for_each(|i| {
+            let _ = buffer.push_back(input[i]);
+        });
+        println!(
+            "input min: {:?}",
+            input
+                .iter()
+                .min_by(|a, b| { a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal) })
+        );
+        println!(
+            "input max: {:?}",
+            input
+                .iter()
+                .max_by(|a, b| { a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal) })
+        );
     }
 }
