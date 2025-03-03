@@ -144,6 +144,11 @@ impl<T> CircularBuffer<T> {
             }
         }
     }
+    pub fn view_buffer(&self) -> &[T] {
+        let slice = &self.items[self.start..add_mod(self.start, self.size, self.capacity())];
+
+        unsafe { slice_assume_init_ref(slice) }
+    }
     #[inline]
     fn inc_start(&mut self) {
         debug_assert!(self.start < self.capacity(), "start out-of-bounds");

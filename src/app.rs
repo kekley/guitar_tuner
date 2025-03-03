@@ -27,7 +27,7 @@ use crate::circular_buffer::CircularBuffer;
 pub const DEFAULT_WINDOW_TITLE: &str = "dodge left dodge right";
 pub const DEFAULT_WIDTH: usize = 800;
 pub const DEFAULT_HEIGHT: usize = 600;
-pub const BUFFER_SIZE: usize = 16000;
+pub const BUFFER_SIZE: usize = 8192;
 unsafe fn get_glow_context(window: &Window) -> glow::Context {
     unsafe {
         glow::Context::from_loader_function(|s| window.subsystem().gl_get_proc_address(s) as _)
@@ -205,14 +205,37 @@ impl App {
         let name_refs = device_names.iter().map(|f| f).collect::<Vec<_>>();
 
         let mut device_number: i32 = 0;
-        let mut device_initialized = false;
-        let mut current_device: Option<&Device> = Some(&devices[device_number as usize]);
+        let mut current_stream: Option<Stream> = None;
         let sample_buffer = Arc::new(Mutex::new(CircularBuffer::<f32>::new(BUFFER_SIZE)));
-        let buffer_arc_clone = sample_buffer.clone();
 
         'main: loop {
-            if !device_initialized {
-                
+            if current_stream.is_none() {
+                println!("huh");
+                let device = &devices[device_number as usize];
+                let config = device
+                    .supported_input_configs()?
+                    .into_iter()
+                    .find(|config| config.sample_format().is_float());
+
+                if config.is_none() {
+                    println!("device {} does not support a float stream", device_number);
+                    device_number += 1;
+                    continue;
+                } else {
+                    let buffer_arc_clone = sample_buffer.clone();
+                    let config = config.unwrap().with_max_sample_rate().config();
+                    let stream = device.build_input_stream(
+                        &config,
+                        move |a, _| {
+                            Self::write_input_data(a, &buffer_arc_clone);
+                        },
+                        move |a| {},
+                        None,
+                    )?;
+                    println!("sample rate: {:?}", config.sample_rate);
+                    stream.play()?;
+                    current_stream = Some(stream);
+                }
             }
             for event in event_pump.poll_iter() {
                 //event passed to imgui
@@ -226,6 +249,8 @@ impl App {
             imgui_platform.prepare_frame(&mut imgui_context, &window, &event_pump);
 
             let ui = imgui_context.new_frame();
+            let lock = sample_buffer.clone();
+            let mut lock = lock.lock().unwrap();
             ///////////////////////////////////////////////
             //ui code  goes here
             ui.window("Input Devices")
@@ -236,13 +261,17 @@ impl App {
                 .resizable(false)
                 .position([0.0, 0.0], imgui::Condition::Always)
                 .build(|| {
-                    let lock = sample_buffer.clone();
-                    let mut lock = lock.lock().unwrap();
-                    ui.list_box("list box", &mut device_number, &name_refs, 7);
+                    let slice = lock.make_contiguous();
+                    println!("slice len: {}", slice.len());
+                    if ui.list_box("list box", &mut device_number, &name_refs, 7) {
+                        current_stream = None;
+                    }
+
                     let a = ui
-                        .plot_lines("data", lock.make_contiguous())
+                        .plot_lines("Sample Data:", &slice)
                         .scale_max(0.5)
-                        .scale_min(-0.5);
+                        .scale_min(-0.5)
+                        .graph_size([500.0, 200.0]);
                     a.build();
                 });
 
@@ -259,6 +288,7 @@ impl App {
                 .map_err(|error| anyhow!(error))?;
 
             window.gl_swap_window();
+            drop(lock);
         }
         Ok(())
     }
