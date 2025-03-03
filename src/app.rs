@@ -5,10 +5,10 @@ use std::{
 };
 
 use anyhow::{anyhow, Ok};
-use circular_buffer::CircularBuffer;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BufferSize, FromSample, Sample, SampleFormat, SampleRate, StreamConfig, ALL_HOSTS,
+    BufferSize, Device, FromSample, Sample, SampleFormat, SampleRate, Stream, StreamConfig,
+    ALL_HOSTS,
 };
 use imgui::Context;
 use imgui_glow_renderer::{
@@ -22,10 +22,12 @@ use sdl2::{
     EventPump, Sdl, VideoSubsystem,
 };
 
+use crate::circular_buffer::CircularBuffer;
+
 pub const DEFAULT_WINDOW_TITLE: &str = "dodge left dodge right";
 pub const DEFAULT_WIDTH: usize = 800;
 pub const DEFAULT_HEIGHT: usize = 600;
-pub const BUFFER_SIZE: usize = 48000;
+pub const BUFFER_SIZE: usize = 16000;
 unsafe fn get_glow_context(window: &Window) -> glow::Context {
     unsafe {
         glow::Context::from_loader_function(|s| window.subsystem().gl_get_proc_address(s) as _)
@@ -201,34 +203,17 @@ impl App {
             .map(|f| f.name().unwrap())
             .collect::<Vec<_>>();
         let name_refs = device_names.iter().map(|f| f).collect::<Vec<_>>();
-        let mut item = 0;
-        let mic = &devices[0];
-        let configs = mic.supported_input_configs()?;
 
-        configs.into_iter().for_each(|f| println!("{:?}", f));
-        let configs = mic.supported_input_configs()?;
-
-        let config = configs
-            .into_iter()
-            .find(|f| f.sample_format().is_float())
-            .unwrap()
-            .with_max_sample_rate()
-            .config();
-
-        let sample_buffer = Arc::new(Mutex::new(CircularBuffer::<BUFFER_SIZE, f32>::new()));
+        let mut device_number: i32 = 0;
+        let mut device_initialized = false;
+        let mut current_device: Option<&Device> = Some(&devices[device_number as usize]);
+        let sample_buffer = Arc::new(Mutex::new(CircularBuffer::<f32>::new(BUFFER_SIZE)));
         let buffer_arc_clone = sample_buffer.clone();
-        let stream = mic.build_input_stream(
-            &config,
-            move |data, callback_info| Self::write_input_data(data, &buffer_arc_clone),
-            move |err| {
-                // react to errors here.
-            },
-            None,
-        )?;
-        println!("name: {}", mic.name()?);
-        stream.play()?;
 
         'main: loop {
+            if !device_initialized {
+                
+            }
             for event in event_pump.poll_iter() {
                 //event passed to imgui
                 imgui_platform.handle_event(&mut imgui_context, &event);
@@ -253,7 +238,7 @@ impl App {
                 .build(|| {
                     let lock = sample_buffer.clone();
                     let mut lock = lock.lock().unwrap();
-                    ui.list_box("list box", &mut item, &name_refs, 7);
+                    ui.list_box("list box", &mut device_number, &name_refs, 7);
                     let a = ui
                         .plot_lines("data", lock.make_contiguous())
                         .scale_max(0.5)
@@ -277,22 +262,10 @@ impl App {
         }
         Ok(())
     }
-    fn write_input_data(input: &[f32], buffer: &Arc<Mutex<CircularBuffer<BUFFER_SIZE, f32>>>) {
+    fn write_input_data(input: &[f32], buffer: &Arc<Mutex<CircularBuffer<f32>>>) {
         let mut buffer = buffer.lock().unwrap();
         (0..input.len()).for_each(|i| {
             let _ = buffer.push_back(input[i]);
         });
-        println!(
-            "input min: {:?}",
-            input
-                .iter()
-                .min_by(|a, b| { a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal) })
-        );
-        println!(
-            "input max: {:?}",
-            input
-                .iter()
-                .max_by(|a, b| { a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal) })
-        );
     }
 }
