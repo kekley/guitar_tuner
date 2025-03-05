@@ -1,12 +1,21 @@
 use std::{
-    iter,
+    fmt, iter,
     mem::{self, MaybeUninit},
+    ptr,
 };
+
+use crate::iter::{IntoIter, Iter};
 
 pub struct CircularBuffer<T: Sized> {
     size: usize,
     start: usize,
     items: Box<[MaybeUninit<T>]>,
+}
+
+impl<T: Clone> Clone for CircularBuffer<T> {
+    fn clone(&self) -> Self {
+        Self::from_iter(self.iter.cloned())
+    }
 }
 
 impl<T> CircularBuffer<T> {
@@ -56,6 +65,30 @@ impl<T> CircularBuffer<T> {
             unsafe { slice_assume_init_mut(slice) }
         }
     }
+    pub fn pop_back(&mut self) -> Option<T> {
+        if self.capacity() == 0 || self.size == 0 {
+            // Nothing to do
+            return None;
+        }
+
+        // SAFETY: if size is greater than 0, the back item is guaranteed to be initialized.
+        let back = unsafe { self.back_maybe_uninit().assume_init_read() };
+        self.dec_size();
+        Some(back)
+    }
+    pub fn pop_front(&mut self) -> Option<T> {
+        if self.capacity() == 0 || self.size == 0 {
+            // Nothing to do
+            return None;
+        }
+
+        // SAFETY: if size is greater than 0, the front item is guaranteed to be initialized.
+        let front = unsafe { self.front_maybe_uninit().assume_init_read() };
+        self.dec_size();
+        self.inc_start();
+        Some(front)
+    }
+
     #[inline]
     fn front_maybe_uninit_mut(&mut self) -> &mut MaybeUninit<T> {
         debug_assert!(self.size > 0, "empty buffer");
@@ -168,6 +201,77 @@ impl<T> CircularBuffer<T> {
     fn dec_size(&mut self) {
         debug_assert!(self.size > 0, "size is 0");
         self.size -= 1;
+    }
+}
+impl<T> fmt::Debug for CircularBuffer<T>
+where
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self).finish()
+    }
+}
+
+impl<T> IntoIterator for CircularBuffer<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter::new(self)
+    }
+}
+
+impl<'a, T> IntoIterator for &'a CircularBuffer<T> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        Iter::new(self)
+    }
+}
+impl<const M: usize, T> From<[T; M]> for CircularBuffer<T> {
+    fn from(mut arr: [T; M]) -> Self {
+        let mut elems = unsafe { MaybeUninit::<[MaybeUninit<T>; M]>::uninit().assume_init() };
+        let arr_ptr = &arr as *const T as *const MaybeUninit<T>;
+        let elems_ptr = &mut elems as *mut MaybeUninit<T>;
+        let size = M;
+
+        // SAFETY:
+        // - `M - size` is non-negative, and `arr_ptr.add(M - size)` points to a memory location
+        //   that contains exactly `size` elements
+        // - `elems_ptr` points to a memory location that contains exactly `N` elements, and `N` is
+        //   greater than or equal to `size`
+        unsafe {
+            ptr::copy_nonoverlapping(arr_ptr.add(M - size), elems_ptr, size);
+        }
+
+        // Prevent destructors from running on those elements that we've taken ownership of; only
+        // destroy the elements that were discareded
+        //
+        // SAFETY: All elements in `arr` are initialized; `forget` will make sure that destructors
+        // are not run twice
+        unsafe {
+            ptr::drop_in_place(&mut arr[..M - size]);
+        }
+        mem::forget(arr);
+
+        Self {
+            size,
+            start: 0,
+            items: Box::new(elems),
+        }
+    }
+}
+
+impl<T> FromIterator<T> for CircularBuffer<T> {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        // TODO Optimize
+        iter.into_iter().collect();
     }
 }
 #[inline]
