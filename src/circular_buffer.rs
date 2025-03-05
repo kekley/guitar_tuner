@@ -4,7 +4,7 @@ use std::{
     ptr,
 };
 
-use crate::iter::{IntoIter, Iter};
+use crate::iter::{IntoIter, Iter, IterMut};
 
 pub struct CircularBuffer<T: Sized> {
     size: usize,
@@ -14,7 +14,7 @@ pub struct CircularBuffer<T: Sized> {
 
 impl<T: Clone> Clone for CircularBuffer<T> {
     fn clone(&self) -> Self {
-        Self::from_iter(self.iter.cloned())
+        Self::from_iter(self.iter().cloned())
     }
 }
 
@@ -42,7 +42,55 @@ impl<T> CircularBuffer<T> {
     pub fn is_full(&self) -> bool {
         self.size == self.capacity()
     }
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter::new(self)
+    }
+    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
+        IterMut::new(self)
+    }
+    pub fn as_mut_slices(&mut self) -> (&mut [T], &mut [T]) {
+        if self.capacity() == 0 || self.size == 0 {
+            return (&mut [][..], &mut [][..]);
+        }
 
+        debug_assert!(self.start < self.capacity(), "start out-of-bounds");
+        debug_assert!(self.size <= self.capacity(), "size out-of-bounds");
+
+        let start = self.start;
+        let end = add_mod(self.start, self.size, self.capacity());
+
+        let (front, back) = if start < end {
+            (&mut self.items[start..end], &mut [][..])
+        } else {
+            let (back, front) = self.items.split_at_mut(start);
+            (front, &mut back[..end])
+        };
+
+        // SAFETY: The elements in these slices are guaranteed to be initialized
+        unsafe { (slice_assume_init_mut(front), slice_assume_init_mut(back)) }
+    }
+
+    pub fn as_slices(&self) -> (&[T], &[T]) {
+        if self.capacity() == 0 || self.size == 0 {
+            return (&[], &[]);
+        }
+
+        debug_assert!(self.start < self.capacity(), "start out-of-bounds");
+        debug_assert!(self.size <= self.capacity(), "size out-of-bounds");
+
+        let start = self.start;
+        let end = add_mod(self.start, self.size, self.capacity());
+
+        let (front, back) = if start < end {
+            (&self.items[start..end], &[][..])
+        } else {
+            let (back, front) = self.items.split_at(start);
+            (front, &back[..end])
+        };
+
+        // SAFETY: The elements in these slices are guaranteed to be initialized
+        unsafe { (slice_assume_init_ref(front), slice_assume_init_ref(back)) }
+    }
     pub fn make_contiguous(&mut self) -> &mut [T] {
         if self.capacity() == 0 || self.size == 0 {
             return &mut [];
@@ -231,36 +279,31 @@ impl<'a, T> IntoIterator for &'a CircularBuffer<T> {
         Iter::new(self)
     }
 }
-impl<const M: usize, T> From<[T; M]> for CircularBuffer<T> {
-    fn from(mut arr: [T; M]) -> Self {
-        let mut elems = unsafe { MaybeUninit::<[MaybeUninit<T>; M]>::uninit().assume_init() };
-        let arr_ptr = &arr as *const T as *const MaybeUninit<T>;
-        let elems_ptr = &mut elems as *mut MaybeUninit<T>;
-        let size = M;
+impl<T> From<Box<[T]>> for CircularBuffer<T> {
+    fn from(arr: Box<[T]>) -> Self {
+        let size = arr.len();
+        let elems = core::iter::repeat_with(MaybeUninit::uninit)
+            .take(size)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
 
+        let arr_ptr = arr.as_ptr() as *const MaybeUninit<T>;
+        let elems_ptr = elems.as_ptr() as *mut MaybeUninit<T>;
         // SAFETY:
         // - `M - size` is non-negative, and `arr_ptr.add(M - size)` points to a memory location
         //   that contains exactly `size` elements
         // - `elems_ptr` points to a memory location that contains exactly `N` elements, and `N` is
         //   greater than or equal to `size`
         unsafe {
-            ptr::copy_nonoverlapping(arr_ptr.add(M - size), elems_ptr, size);
+            ptr::copy_nonoverlapping(arr_ptr, elems_ptr, size);
         }
 
-        // Prevent destructors from running on those elements that we've taken ownership of; only
-        // destroy the elements that were discareded
-        //
-        // SAFETY: All elements in `arr` are initialized; `forget` will make sure that destructors
-        // are not run twice
-        unsafe {
-            ptr::drop_in_place(&mut arr[..M - size]);
-        }
         mem::forget(arr);
 
         Self {
             size,
             start: 0,
-            items: Box::new(elems),
+            items: elems,
         }
     }
 }
@@ -270,8 +313,7 @@ impl<T> FromIterator<T> for CircularBuffer<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        // TODO Optimize
-        iter.into_iter().collect();
+        iter.into_iter().collect::<Box<[T]>>().into()
     }
 }
 #[inline]
