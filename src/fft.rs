@@ -9,16 +9,29 @@ pub struct FFT {
     direction: TransformType,
 }
 
+fn lower_power_of_two(n: usize) -> usize {
+    if (!(n & (n - 1))) != 0 {
+        return n;
+    } else {
+        return 0x8000000000000000 >> n.leading_zeros();
+    }
+}
+
 impl FFT {
-    pub fn new(data: &[Complex<f32>], direction: TransformType) -> Result<Self, ()> {
-        if !data.len().is_power_of_two() {
-            return Err(());
+    pub fn new(data: &[f32], direction: TransformType) -> Self {
+        let len = if !data.len().is_power_of_two() {
+            lower_power_of_two(data.len())
         } else {
-            let cloned: Box<[Complex<f32>]> = Box::from(data);
-            return Ok(Self {
-                data: cloned,
-                direction,
-            });
+            data.len()
+        };
+
+        let complex = data[0..len]
+            .iter()
+            .map(|value| Complex::new(*value, 0.0))
+            .collect::<Box<[Complex<f32>]>>();
+        Self {
+            data: complex,
+            direction: direction,
         }
     }
 
@@ -94,5 +107,14 @@ impl FFT {
     fn scale(data: &mut [Complex<f32>]) {
         let factor = 1.0 / data.len() as f32;
         data.iter_mut().for_each(|data| *data *= factor);
+    }
+    pub fn freq_table(n: i32, scalar: f32) -> Box<[f32]> {
+        let val = 1.0 / (n as f32 * scalar);
+
+        let half_n = (n - 1) / 2 + 1;
+        let p1 = 0..half_n;
+        let p2 = -n / 2..0;
+        let result = p1.chain(p2).map(|x| x as f32 * val).collect::<Box<[f32]>>();
+        result
     }
 }

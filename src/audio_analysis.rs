@@ -1,12 +1,14 @@
 use anyhow::anyhow;
+use num_complex::{Complex, ComplexFloat};
 use std::{
     array,
     f32::consts::PI,
+    io::copy,
     ops::Not,
     sync::{Arc, Mutex},
 };
 
-use crate::circular_buffer::CircularBuffer;
+use crate::{circular_buffer::CircularBuffer, fft::FFT};
 pub const NOTE_NAMES: [&'static str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
@@ -29,7 +31,7 @@ pub enum Note {
 }
 
 impl Note {
-    fn to_str(&self) -> &'static str {
+    pub fn to_str(&self) -> &'static str {
         match self {
             Note::C => NOTE_NAMES[0],
             Note::CSharp => NOTE_NAMES[1],
@@ -78,6 +80,7 @@ pub struct AudioAnalyzer {
     window: Box<[f32]>,
     buffer: CircularBuffer<f32>,
     padded_buffer: Box<[f32]>,
+    freq_table: Box<[f32]>,
     hps_count: usize,
     a4_freq: u32,
     sample_rate: u32,
@@ -100,6 +103,8 @@ impl AudioAnalyzer {
             WindowType::Hamming => Self::build_hamming_window(buffer_size),
             WindowType::Hann => Self::build_hann_window(buffer_size),
         };
+        let freq_table =
+            FFT::freq_table((buffer_size * zero_padding_factor).try_into().unwrap(), 1.0);
 
         Self {
             window,
@@ -108,10 +113,11 @@ impl AudioAnalyzer {
             a4_freq,
             hps_count,
             sample_rate,
+            freq_table,
         }
     }
 
-    pub fn build_hamming_window(size: usize) -> Box<[f32]> {
+    fn build_hamming_window(size: usize) -> Box<[f32]> {
         (0..size)
             .map(|i| {
                 let val = 0.54 - 0.46 * (2.0 * PI * i as f32 / size as f32).cos();
@@ -120,7 +126,7 @@ impl AudioAnalyzer {
             .collect::<Box<[f32]>>()
     }
 
-    pub fn build_hann_window(size: usize) -> Box<[f32]> {
+    fn build_hann_window(size: usize) -> Box<[f32]> {
         (0..size)
             .map(|i| {
                 let val = 0.5 * (1.0 - (2.0 * PI * i as f32 / (size as f32 - 1.0))).cos();
@@ -129,7 +135,7 @@ impl AudioAnalyzer {
             .collect::<Box<[f32]>>()
     }
 
-    pub fn apply_window(&mut self) {
+    fn apply_window_to_buffer(&mut self) {
         self.buffer
             .iter_mut()
             .zip(&self.window)
@@ -138,5 +144,56 @@ impl AudioAnalyzer {
             });
     }
 
-    pub fn find_tone(&mut self) {}
+    fn copy_buffer_to_padded(&mut self) {
+        self.buffer
+            .iter()
+            .zip(self.padded_buffer.iter_mut())
+            .for_each(|(src, dest)| {
+                *dest = *src;
+            });
+    }
+
+    pub fn find_tone(&mut self) {
+        self.apply_window_to_buffer();
+        self.copy_buffer_to_padded();
+
+        let fft = FFT::new(&self.padded_buffer, crate::dft::TransformType::Forward);
+        let mut result = fft
+            .transform(false)
+            .iter_mut()
+            .map(|f| f.abs())
+            .collect::<Box<[f32]>>();
+        let half_len = result.len() / 2;
+        let half_data = &mut result[0..half_len];
+
+        let copy = half_data.to_owned();
+
+        (0..self.hps_count).for_each(|i| {
+            let hps_len = half_data.len().div_ceil(i);
+            half_data[0..hps_len].iter_mut().for_each(|value| {
+                copy.iter().step_by(i).for_each(|factor| {
+                    *value *= factor;
+                });
+            });
+        });
+        self.freq_table.iter().enumerate().for_each(|(i, freq)| {
+            if *freq > 60.0 {
+                half_data[0..i].iter_mut().for_each(|value| {
+                    *value = 0.0;
+                });
+            }
+        });
+
+        let loudest_tone_index = half_data
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(index, _)| index)
+            .unwrap();
+
+        let loudest_freq = self.freq_table[loudest_tone_index];
+
+        let note = Note::from_frequency(loudest_freq);
+        println!("{}", note.to_str());
+    }
 }
