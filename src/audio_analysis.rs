@@ -14,6 +14,20 @@ pub const NOTE_NAMES: [&'static str; 12] = [
 ];
 pub const EMPTY_STR: &'static str = "";
 pub const A4_FREQUENCY: u32 = 440;
+
+#[derive(Debug, Clone, Copy)]
+pub enum SampleRate {
+    KHz44_1 = 44100,
+    KHz48 = 48000,
+    KHz88_2 = 88200,
+    KHz96 = 96000,
+}
+
+impl SampleRate {
+    pub fn to_u32(self) -> u32 {
+        self as u32
+    }
+}
 pub enum Note {
     C = 0,
     CSharp = 1,
@@ -157,7 +171,7 @@ impl AudioAnalyzer {
         self.apply_window_to_buffer();
         self.copy_buffer_to_padded();
 
-        let fft = FFT::new(&self.padded_buffer, crate::dft::TransformType::Forward);
+        let mut fft = FFT::new(&self.padded_buffer, crate::dft::TransformType::Forward);
         let mut result = fft
             .transform(false)
             .iter_mut()
@@ -168,7 +182,7 @@ impl AudioAnalyzer {
 
         let copy = half_data.to_owned();
 
-        (0..self.hps_count).for_each(|i| {
+        (0..self.hps_count).for_each(|i: usize| {
             let hps_len = half_data.len().div_ceil(i);
             half_data[0..hps_len].iter_mut().for_each(|value| {
                 copy.iter().step_by(i).for_each(|factor| {
@@ -192,8 +206,22 @@ impl AudioAnalyzer {
             .unwrap();
 
         let loudest_freq = self.freq_table[loudest_tone_index];
+        let bytes = include_bytes!(".././A.wav");
 
         let note = Note::from_frequency(loudest_freq);
         println!("{}", note.to_str());
     }
+}
+
+#[test]
+fn test_notes() {
+    let bytes = include_bytes!(".././A.wav");
+    let analyzer = AudioAnalyzer::new(
+        SampleRate::KHz48.to_u32(),
+        1024 * 50,
+        3,
+        3,
+        440,
+        WindowType::Hann,
+    );
 }

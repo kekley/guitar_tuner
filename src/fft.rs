@@ -35,11 +35,10 @@ impl FFT {
         }
     }
 
-    pub fn transform(self, scale: bool) -> Box<[Complex<f32>]> {
-        let mut data = self.data;
-        Self::rearrange(&mut data);
-        Self::in_place_transform(&mut data, self.direction, scale);
-        data
+    pub fn transform(&mut self, scale: bool) -> &mut [Complex<f32>] {
+        Self::rearrange(&mut self.data);
+        Self::in_place_transform(&mut self.data, self.direction, scale);
+        &mut self.data
     }
     pub fn fft(data: &mut [Complex<f32>], direction: TransformType, scale: bool) -> Result<(), ()> {
         Self::rearrange(data);

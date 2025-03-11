@@ -4,6 +4,7 @@ use num_complex::{c32, Complex, ComplexFloat};
 
 const COMPLEX_E: Complex<f32> = Complex::new(E, 0.0);
 
+#[derive(Debug, Clone, Copy)]
 pub enum TransformType {
     Forward,
     Inverse,
