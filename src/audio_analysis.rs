@@ -216,6 +216,7 @@ impl AudioAnalyzer {
 #[test]
 fn test_notes() {
     let bytes = include_bytes!(".././A.wav");
+
     let analyzer = AudioAnalyzer::new(
         SampleRate::KHz48.to_u32(),
         1024 * 50,
@@ -224,4 +225,6 @@ fn test_notes() {
         440,
         WindowType::Hann,
     );
+
+    
 }
