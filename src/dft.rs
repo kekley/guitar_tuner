@@ -1,9 +1,15 @@
-use std::f32::consts::{E, PI};
+use std::{
+    f32::consts::{E, PI},
+    io::Cursor,
+};
 
 use num_complex::{c32, Complex, ComplexFloat};
 
+use crate::wav::WavFile;
+
 const COMPLEX_E: Complex<f32> = Complex::new(E, 0.0);
 
+#[derive(Debug, Clone, Copy)]
 pub enum TransformType {
     Forward,
     Inverse,
