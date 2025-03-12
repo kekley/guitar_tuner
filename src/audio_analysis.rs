@@ -248,6 +248,23 @@ fn test_analysis() {
     analyzer.add_samples(wav.get_samples());
     let a = analyzer.find_tone();
     assert_eq!(a, Note::A);
+
+    let bytes = include_bytes!(".././B.wav");
+    let mut cursor = Cursor::new(bytes);
+    let wav = WavFile::from_bytes(&mut cursor).unwrap();
+
+    let mut analyzer = AudioAnalyzer::new(
+        SampleRate::KHz48.to_u32(),
+        1024 * 50,
+        3,
+        3,
+        440,
+        WindowType::Hann,
+    );
+
+    analyzer.add_samples(wav.get_samples());
+    let b = analyzer.find_tone();
+    assert_eq!(b, Note::B);
 }
 
 #[test]
