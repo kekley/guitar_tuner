@@ -28,6 +28,7 @@ impl SampleRate {
         self as u32
     }
 }
+#[derive(Debug, PartialEq, Eq)]
 pub enum Note {
     C = 0,
     CSharp = 1,
@@ -172,7 +173,7 @@ impl AudioAnalyzer {
             });
     }
 
-    pub fn find_tone(&mut self) {
+    pub fn find_tone(&mut self) -> Note {
         self.apply_window_to_buffer();
         self.copy_buffer_to_padded();
 
@@ -190,22 +191,29 @@ impl AudioAnalyzer {
             (half_data.len() * 2).try_into().unwrap(),
             1.0 / self.sample_rate as f32,
         );
+        for i in 2..=self.hps_count {
+            let hps_len = half_data.len() / i; // or equivalent rounding
+            for k in 0..hps_len {
+                half_data[k] *= copy[k * i];
+            }
+        }
 
-        (2..self.hps_count + 1).for_each(|i: usize| {
+        /*         (2..self.hps_count + 1).for_each(|i: usize| {
             let hps_len = half_data.len().div_ceil(i);
             half_data[0..hps_len].iter_mut().for_each(|value| {
                 copy.iter().step_by(i).for_each(|factor| {
                     *value *= factor;
                 });
             });
-        });
-        freq_table.iter().enumerate().for_each(|(i, freq)| {
-            if *freq > 60.0 {
-                half_data[0..i].iter_mut().for_each(|value| {
-                    *value = 0.0;
-                });
-            }
-        });
+        }); */
+        freq_table[0..half_data.len()]
+            .iter()
+            .enumerate()
+            .for_each(|(i, freq)| {
+                if *freq < 60.0 {
+                    half_data[i] = 0.0
+                }
+            });
 
         let loudest_tone_index = half_data
             .iter()
@@ -218,11 +226,12 @@ impl AudioAnalyzer {
 
         let note = Note::from_frequency(loudest_freq);
         println!("{}", note.to_str());
+        note
     }
 }
 
 #[test]
-fn test_notes() {
+fn test_analysis() {
     let bytes = include_bytes!(".././A.wav");
     let mut cursor = Cursor::new(bytes);
     let wav = WavFile::from_bytes(&mut cursor).unwrap();
@@ -237,13 +246,16 @@ fn test_notes() {
     );
 
     analyzer.add_samples(wav.get_samples());
-    analyzer.find_tone();
+    let a = analyzer.find_tone();
+    assert_eq!(a, Note::A);
 }
 
 #[test]
 fn test_note_to_str() {
     let freq = Note::number_to_freq(69, 440);
     let note = Note::from_frequency(freq).to_str();
+    assert_eq!(freq, 440.0);
+    assert_eq!(note, "A");
     println!("freq: {}", freq);
     println!("note: {}", note);
 }

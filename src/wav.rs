@@ -99,8 +99,8 @@ impl RiffChunk {
         }
     }
 }
-#[derive(Debug)]
 
+#[derive(Debug)]
 struct FmtChunk {
     fmt_str: [u8; 4],
     chunk_size: u32,
@@ -348,6 +348,4 @@ fn file_read() {
     let mut cursor = Cursor::new(file);
 
     let wav = WavFile::from_bytes(&mut cursor).unwrap();
-
-    println!("{:?}", wav);
 }
