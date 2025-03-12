@@ -324,6 +324,12 @@ impl WavFile {
             data_chunk: data_chunk.ok_or(anyhow!("No data chunk"))?,
         })
     }
+
+    pub fn get_samples(&self) -> &[f32] {
+        let data = self.data_chunk.data.as_ref();
+        let a = unsafe { data.align_to::<f32>() };
+        a.1
+    }
 }
 #[test]
 fn headers() {

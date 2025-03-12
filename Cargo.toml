@@ -12,3 +12,5 @@ imgui-glow-renderer = "0.13.0"
 imgui-sdl2-support = "0.13.0"
 num-complex = "0.4.6"
 sdl2 = "0.37.0"
+[profile.test]
+inherits = "release"

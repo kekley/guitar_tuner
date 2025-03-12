@@ -3,12 +3,12 @@ use num_complex::{Complex, ComplexFloat};
 use std::{
     array,
     f32::consts::PI,
-    io::copy,
+    io::{copy, Cursor},
     ops::Not,
     sync::{Arc, Mutex},
 };
 
-use crate::{circular_buffer::CircularBuffer, fft::FFT};
+use crate::{circular_buffer::CircularBuffer, fft::FFT, wav::WavFile};
 pub const NOTE_NAMES: [&'static str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
@@ -45,6 +45,9 @@ pub enum Note {
 }
 
 impl Note {
+    pub fn number_to_freq(number: u32, a4_freq: u32) -> f32 {
+        a4_freq as f32 * 2.0.powf((number - 69) as f32 / 12.0)
+    }
     pub fn to_str(&self) -> &'static str {
         match self {
             Note::C => NOTE_NAMES[0],
@@ -94,7 +97,6 @@ pub struct AudioAnalyzer {
     window: Box<[f32]>,
     buffer: CircularBuffer<f32>,
     padded_buffer: Box<[f32]>,
-    freq_table: Box<[f32]>,
     hps_count: usize,
     a4_freq: u32,
     sample_rate: u32,
@@ -117,8 +119,6 @@ impl AudioAnalyzer {
             WindowType::Hamming => Self::build_hamming_window(buffer_size),
             WindowType::Hann => Self::build_hann_window(buffer_size),
         };
-        let freq_table =
-            FFT::freq_table((buffer_size * zero_padding_factor).try_into().unwrap(), 1.0);
 
         Self {
             window,
@@ -127,8 +127,13 @@ impl AudioAnalyzer {
             a4_freq,
             hps_count,
             sample_rate,
-            freq_table,
         }
+    }
+
+    fn add_samples(&mut self, samples: &[f32]) {
+        samples.iter().for_each(|sample| {
+            self.buffer.push_back(*sample);
+        });
     }
 
     fn build_hamming_window(size: usize) -> Box<[f32]> {
@@ -181,8 +186,12 @@ impl AudioAnalyzer {
         let half_data = &mut result[0..half_len];
 
         let copy = half_data.to_owned();
+        let freq_table = FFT::freq_table(
+            (half_data.len() * 2).try_into().unwrap(),
+            1.0 / self.sample_rate as f32,
+        );
 
-        (0..self.hps_count).for_each(|i: usize| {
+        (2..self.hps_count + 1).for_each(|i: usize| {
             let hps_len = half_data.len().div_ceil(i);
             half_data[0..hps_len].iter_mut().for_each(|value| {
                 copy.iter().step_by(i).for_each(|factor| {
@@ -190,7 +199,7 @@ impl AudioAnalyzer {
                 });
             });
         });
-        self.freq_table.iter().enumerate().for_each(|(i, freq)| {
+        freq_table.iter().enumerate().for_each(|(i, freq)| {
             if *freq > 60.0 {
                 half_data[0..i].iter_mut().for_each(|value| {
                     *value = 0.0;
@@ -205,8 +214,7 @@ impl AudioAnalyzer {
             .map(|(index, _)| index)
             .unwrap();
 
-        let loudest_freq = self.freq_table[loudest_tone_index];
-        let bytes = include_bytes!(".././A.wav");
+        let loudest_freq = freq_table[loudest_tone_index];
 
         let note = Note::from_frequency(loudest_freq);
         println!("{}", note.to_str());
@@ -216,8 +224,10 @@ impl AudioAnalyzer {
 #[test]
 fn test_notes() {
     let bytes = include_bytes!(".././A.wav");
+    let mut cursor = Cursor::new(bytes);
+    let wav = WavFile::from_bytes(&mut cursor).unwrap();
 
-    let analyzer = AudioAnalyzer::new(
+    let mut analyzer = AudioAnalyzer::new(
         SampleRate::KHz48.to_u32(),
         1024 * 50,
         3,
@@ -226,5 +236,14 @@ fn test_notes() {
         WindowType::Hann,
     );
 
-    
+    analyzer.add_samples(wav.get_samples());
+    analyzer.find_tone();
+}
+
+#[test]
+fn test_note_to_str() {
+    let freq = Note::number_to_freq(69, 440);
+    let note = Note::from_frequency(freq).to_str();
+    println!("freq: {}", freq);
+    println!("note: {}", note);
 }

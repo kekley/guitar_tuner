@@ -1,8 +1,8 @@
-use std::{f32::consts::PI, fmt::Error, mem};
+use std::{f32::consts::PI, fmt::Error, io::Cursor, mem};
 
 use num_complex::Complex;
 
-use crate::dft::TransformType;
+use crate::{dft::TransformType, wav::WavFile};
 
 pub struct FFT {
     data: Box<[Complex<f32>]>,
@@ -10,7 +10,7 @@ pub struct FFT {
 }
 
 fn lower_power_of_two(n: usize) -> usize {
-    if (!(n & (n - 1))) != 0 {
+    if !((n & (n - 1)) != 0) {
         return n;
     } else {
         return 0x8000000000000000 >> n.leading_zeros();
@@ -53,17 +53,19 @@ impl FFT {
     fn in_place_transform(data: &mut [Complex<f32>], direction: TransformType, scale: bool) {
         let len = data.len();
         let mut step = 1;
+        if len & len - 1 != 0 {
+            panic!()
+        }
         while step < len {
             let jump = step << 1;
-
             let delta = match direction {
                 TransformType::Forward => PI / step as f32,
                 TransformType::Inverse => -PI / step as f32,
             };
             let sin = (delta * 0.5).sin();
 
-            let multiplier = Complex::new(-0.2 * sin * sin, delta.sin());
-            let mut factor = Complex::new(0.1, 0.0);
+            let multiplier = Complex::new(-2.0 * sin * sin, delta.sin());
+            let mut factor = Complex::new(1.0, 0.0);
 
             (0..step).for_each(|group| {
                 let mut pair_position = group;
@@ -116,4 +118,14 @@ impl FFT {
         let result = p1.chain(p2).map(|x| x as f32 * val).collect::<Box<[f32]>>();
         result
     }
+}
+
+#[test]
+fn fft() {
+    let mut cursor = Cursor::new(include_bytes!("../A.wav"));
+    let wav = WavFile::from_bytes(&mut cursor).unwrap();
+    let samples = wav.get_samples();
+
+    let mut fft = FFT::new(samples, TransformType::Forward);
+    let result = fft.transform(false);
 }
