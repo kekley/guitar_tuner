@@ -1,5 +1,6 @@
 use std::{
     fmt::Debug,
+    ops::Deref,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -22,7 +23,7 @@ use sdl2::{
     EventPump, Sdl, VideoSubsystem,
 };
 
-use crate::circular_buffer::CircularBuffer;
+use crate::{audio_analysis::AudioAnalyzer, circular_buffer::CircularBuffer};
 
 pub const DEFAULT_WINDOW_TITLE: &str = "dodge left dodge right";
 pub const DEFAULT_WIDTH: usize = 800;
@@ -148,7 +149,7 @@ impl AppBuilder {
         let (imgui_context, imgui_platform, imgui_renderer) = init_imgui(glow_context)?;
 
         let event_pump = sdl.event_pump().map_err(|error| anyhow!(error))?;
-
+        let audio_host = cpal::default_host();
         let app = App {
             sdl,
             video_subsystem,
@@ -158,22 +159,60 @@ impl AppBuilder {
             imgui_platform,
             imgui_renderer,
             event_pump,
+            audio_host,
+            sample_buffer: Arc::new(Mutex::new(CircularBuffer::new(2048))),
         };
 
         Ok(app)
     }
 }
 
+/*         let mut window_size_x = window_size_x as f32;
+       let mut window_size_y = window_size_y as f32;
+       let mut device_number: i32 = 0;
+       let mut current_stream: Option<Stream> = None;
+       let mut device_list: Vec<Device> = vec![];
+       let mut device_names: Vec<Box<str>> = vec![];
+       let mut need_device_refresh = true;
+       let mut sample_buffer = Arc::new(Mutex::new(CircularBuffer::<f32>::new(BUFFER_SIZE)));
+*/
+struct AppContext {
+    window_size_x: u32,
+    window_size_y: u32,
+    device_number: i32,
+    current_stream: Option<Stream>,
+    device_list: Vec<Device>,
+    device_names: Vec<String>,
+    need_device_refresh: bool,
+    audio_analyzer: Option<AudioAnalyzer>,
+}
+
+impl AppContext {
+    fn new(app: &App) -> Self {
+        let size = app.window.size();
+        Self {
+            window_size_x: size.0,
+            window_size_y: size.1,
+            device_number: 0,
+            current_stream: None,
+            device_list: vec![],
+            device_names: vec![],
+            need_device_refresh: true,
+            audio_analyzer: None,
+        }
+    }
+}
 pub struct App {
     sdl: Sdl,
     video_subsystem: VideoSubsystem,
-
     window: Window,
     gl_context: GLContext,
     imgui_context: imgui::Context,
     imgui_platform: SdlPlatform,
     imgui_renderer: AutoRenderer,
     event_pump: EventPump,
+    audio_host: Host,
+    sample_buffer: Arc<Mutex<CircularBuffer<f32>>>,
 }
 
 impl App {
@@ -182,6 +221,7 @@ impl App {
     }
 
     pub fn run(mut self) -> anyhow::Result<()> {
+        let mut context = AppContext::new(&self);
         let App {
             mut sdl,
             mut video_subsystem,
@@ -191,18 +231,9 @@ impl App {
             mut imgui_platform,
             mut imgui_renderer,
             mut event_pump,
+            audio_host,
+            sample_buffer,
         } = self;
-
-        let (window_size_x, window_size_y) = window.size();
-        let host = cpal::default_host();
-        let mut window_size_x = window_size_x as f32;
-        let mut window_size_y = window_size_y as f32;
-        let mut device_number: i32 = 0;
-        let mut current_stream: Option<Stream> = None;
-        let mut device_list: Vec<Device> = vec![];
-        let mut device_names: Vec<Box<str>> = vec![];
-        let mut need_device_refresh = true;
-        let mut sample_buffer = Arc::new(Mutex::new(CircularBuffer::<f32>::new(BUFFER_SIZE)));
 
         'main: loop {
             for event in event_pump.poll_iter() {
@@ -213,10 +244,10 @@ impl App {
                     break 'main;
                 }
                 if let Event::AudioDeviceAdded { .. } = event {
-                    need_device_refresh = true;
+                    context.need_device_refresh = true;
                 }
                 if let Event::AudioDeviceRemoved { .. } = event {
-                    need_device_refresh = true;
+                    context.need_device_refresh = true;
                 }
 
                 if let Event::Window {
@@ -227,22 +258,27 @@ impl App {
                 {
                     match win_event {
                         WindowEvent::SizeChanged(x, y) => {
-                            window_size_x = x as f32;
-                            window_size_y = y as f32;
+                            context.window_size_x = x as u32;
+                            context.window_size_y = y as u32;
                         }
                         _ => {}
                     }
                 }
             }
-            if need_device_refresh {
-                Self::refresh_device_list(&host, &mut device_list, &mut device_names);
+            if context.need_device_refresh {
+                Self::refresh_device_list(
+                    &audio_host,
+                    &mut context.device_list,
+                    &mut context.device_names,
+                );
             }
-            if current_stream.is_none() {
+            if context.current_stream.is_none() {
                 let swap_succeeded = Self::swap_device(
-                    &mut current_stream,
-                    &mut device_list,
-                    device_number,
-                    &mut sample_buffer,
+                    &mut context.current_stream,
+                    &mut context.device_list,
+                    context.device_number,
+                    &mut context.audio_analyzer,
+                    &sample_buffer,
                 );
                 if swap_succeeded.is_err() {}
             }
@@ -251,18 +287,27 @@ impl App {
             let ui = imgui_context.new_frame();
             let mut guard = sample_buffer.lock().unwrap();
             let sample_data = guard.make_contiguous();
+            match &mut context.audio_analyzer {
+                Some(analyzer) => analyzer.add_samples(&sample_data),
+                None => {}
+            }
             ///////////////////////////////////////////////
             //ui code  goes here
-            if Self::draw_device_list(
-                &device_names,
-                ui,
-                &mut device_number,
-                window_size_x,
-                window_size_y,
-            ) {
-                current_stream = None;
+            if Self::draw_device_list(&mut context, &ui) {
+                context.current_stream = None;
             }
-            Self::draw_sample_graph(&sample_data, &ui, window_size_x, window_size_y);
+            Self::draw_sample_graph(
+                &sample_data,
+                &ui,
+                context.window_size_x as f32,
+                context.window_size_y as f32,
+            );
+            match &mut context.audio_analyzer {
+                Some(analyzer) => ui.text(analyzer.find_tone().to_str()),
+                None => {
+                    ui.text("No audio analyzer rn");
+                }
+            }
             //////////////////////////////////////////////
 
             let draw_data = imgui_context.render();
@@ -310,11 +355,7 @@ impl App {
             });
     }
 
-    fn refresh_device_list(
-        host: &Host,
-        devices: &mut Vec<Device>,
-        device_names: &mut Vec<Box<str>>,
-    ) {
+    fn refresh_device_list(host: &Host, devices: &mut Vec<Device>, device_names: &mut Vec<String>) {
         devices.clear();
         device_names.clear();
         for (device_num, device) in host
@@ -324,45 +365,45 @@ impl App {
         {
             let device_name = device
                 .name()
-                .unwrap_or(format!("Unnamed Device {}", device_num))
-                .into_boxed_str();
+                .unwrap_or(format!("Unnamed Device {}", device_num));
             device_names.push(device_name);
             devices.push(device);
         }
     }
     //returns true if we need to switch audio devices
-    fn draw_device_list(
-        device_names: &[Box<str>],
-        ui: &Ui,
-        device_number: &mut i32,
-        window_size_x: f32,
-        window_size_y: f32,
-    ) -> bool {
+    fn draw_device_list(context: &mut AppContext, ui: &Ui) -> bool {
         ui.window("Input Devices")
             .size(
-                [window_size_x / 2.0, window_size_y / 2.0],
+                [
+                    context.window_size_x as f32 / 2.0,
+                    context.window_size_y as f32 / 2.0,
+                ],
                 imgui::Condition::FirstUseEver,
             )
             .resizable(true)
             .movable(true)
             .position([0.0, 0.0], imgui::Condition::FirstUseEver)
             .build(|| -> bool {
-                let old_device_num = *device_number;
+                let old_device_num = context.device_number;
                 const NULL_STR: &str = "";
                 let mut refs = [NULL_STR; 20];
                 let mut len: usize = 0;
-                device_names.iter().enumerate().for_each(|(i, name)| {
-                    let ref_slot = refs.get_mut(i);
-                    match ref_slot {
-                        Some(slot) => {
-                            *slot = name.as_ref();
-                            len += 1;
+                context
+                    .device_names
+                    .iter()
+                    .enumerate()
+                    .for_each(|(i, name)| {
+                        let ref_slot = refs.get_mut(i);
+                        match ref_slot {
+                            Some(slot) => {
+                                *slot = name.as_ref();
+                                len += 1;
+                            }
+                            None => {}
                         }
-                        None => {}
-                    }
-                });
-                if ui.list_box("list box", device_number, &refs[0..len], 7)
-                    && old_device_num != *device_number
+                    });
+                if ui.list_box("list box", &mut context.device_number, &refs[0..len], 7)
+                    && old_device_num != context.device_number
                 {
                     return true;
                 } else {
@@ -376,6 +417,7 @@ impl App {
         current_stream: &mut Option<Stream>,
         devices: &mut Vec<Device>,
         device_number: i32,
+        audio_analyzer: &mut Option<AudioAnalyzer>,
         sample_buffer: &Arc<Mutex<CircularBuffer<f32>>>,
     ) -> anyhow::Result<()> {
         if current_stream.is_none() {
@@ -398,6 +440,14 @@ impl App {
                     move |a| {},
                     None,
                 )?;
+                *audio_analyzer = Some(AudioAnalyzer::new(
+                    1024 * 50,
+                    config.sample_rate.0 as usize,
+                    3,
+                    3,
+                    440,
+                    crate::audio_analysis::WindowType::Hann,
+                ));
                 println!("sample rate: {:?}", config.sample_rate);
                 stream.play()?;
                 *current_stream = Some(stream);
@@ -405,4 +455,9 @@ impl App {
         }
         Ok(())
     }
+}
+
+#[test]
+fn arena_size_calc() {
+    println!("Device Size: {}", size_of::<Device>())
 }

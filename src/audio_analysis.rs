@@ -131,7 +131,7 @@ impl AudioAnalyzer {
         }
     }
 
-    fn add_samples(&mut self, samples: &[f32]) {
+    pub fn add_samples(&mut self, samples: &[f32]) {
         samples.iter().for_each(|sample| {
             self.buffer.push_back(*sample);
         });
@@ -174,6 +174,7 @@ impl AudioAnalyzer {
     }
 
     pub fn find_tone(&mut self) -> Note {
+        self.buffer.make_contiguous();
         self.apply_window_to_buffer();
         self.copy_buffer_to_padded();
 
@@ -222,10 +223,9 @@ impl AudioAnalyzer {
             .map(|(index, _)| index)
             .unwrap();
 
-        let loudest_freq = freq_table[loudest_tone_index];
-
+        let loudest_freq = (freq_table[loudest_tone_index] * 100.0).round() / 100.0;
+        println!("{}", loudest_freq);
         let note = Note::from_frequency(loudest_freq);
-        println!("{}", note.to_str());
         note
     }
 }
@@ -248,7 +248,22 @@ fn test_analysis() {
     analyzer.add_samples(wav.get_samples());
     let a = analyzer.find_tone();
     assert_eq!(a, Note::A);
+    let bytes = include_bytes!(".././A_RECORDING.wav");
+    let mut cursor = Cursor::new(bytes);
+    let wav = WavFile::from_bytes(&mut cursor).unwrap();
 
+    let mut analyzer = AudioAnalyzer::new(
+        SampleRate::KHz48.to_u32(),
+        1024 * 50,
+        3,
+        3,
+        440,
+        WindowType::Hann,
+    );
+
+    analyzer.add_samples(wav.get_samples());
+    let a = analyzer.find_tone();
+    assert_eq!(a, Note::A);
     let bytes = include_bytes!(".././B.wav");
     let mut cursor = Cursor::new(bytes);
     let wav = WavFile::from_bytes(&mut cursor).unwrap();
