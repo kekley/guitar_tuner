@@ -161,6 +161,14 @@ impl AppBuilder {
             event_pump,
             audio_host,
             sample_buffer: Arc::new(Mutex::new(CircularBuffer::new(2048))),
+            audio_analyzer: Arc::new(Mutex::new(AudioAnalyzer::new(
+                1024 * 50,
+                1,
+                1,
+                1,
+                440,
+                crate::audio_analysis::WindowType::Hann,
+            ))),
         };
 
         Ok(app)
@@ -184,7 +192,6 @@ struct AppContext {
     device_list: Vec<Device>,
     device_names: Vec<String>,
     need_device_refresh: bool,
-    audio_analyzer: Option<AudioAnalyzer>,
 }
 
 impl AppContext {
@@ -198,7 +205,6 @@ impl AppContext {
             device_list: vec![],
             device_names: vec![],
             need_device_refresh: true,
-            audio_analyzer: None,
         }
     }
 }
@@ -213,6 +219,7 @@ pub struct App {
     event_pump: EventPump,
     audio_host: Host,
     sample_buffer: Arc<Mutex<CircularBuffer<f32>>>,
+    audio_analyzer: Arc<Mutex<AudioAnalyzer>>,
 }
 
 impl App {
@@ -233,6 +240,7 @@ impl App {
             mut event_pump,
             audio_host,
             sample_buffer,
+            audio_analyzer,
         } = self;
 
         'main: loop {
@@ -277,7 +285,7 @@ impl App {
                     &mut context.current_stream,
                     &mut context.device_list,
                     context.device_number,
-                    &mut context.audio_analyzer,
+                    &audio_analyzer,
                     &sample_buffer,
                 );
                 if swap_succeeded.is_err() {}
@@ -285,12 +293,10 @@ impl App {
             imgui_platform.prepare_frame(&mut imgui_context, &window, &event_pump);
 
             let ui = imgui_context.new_frame();
-            let mut guard = sample_buffer.lock().unwrap();
-            let sample_data = guard.make_contiguous();
-            match &mut context.audio_analyzer {
-                Some(analyzer) => analyzer.add_samples(&sample_data),
-                None => {}
-            }
+            let mut buffer_guard = sample_buffer.lock().unwrap();
+            let mut analyzer_guard = audio_analyzer.lock().unwrap();
+            let sample_data = buffer_guard.make_contiguous();
+
             ///////////////////////////////////////////////
             //ui code  goes here
             if Self::draw_device_list(&mut context, &ui) {
@@ -302,14 +308,10 @@ impl App {
                 context.window_size_x as f32,
                 context.window_size_y as f32,
             );
-            match &mut context.audio_analyzer {
-                Some(analyzer) => ui.text(analyzer.find_tone().to_str()),
-                None => {
-                    ui.text("No audio analyzer rn");
-                }
-            }
+            ui.window("Note Analysis").build(|| {
+                ui.text(analyzer_guard.find_tone().to_str());
+            });
             //////////////////////////////////////////////
-
             let draw_data = imgui_context.render();
 
             unsafe {
@@ -321,12 +323,17 @@ impl App {
                 .map_err(|error| anyhow!(error))?;
 
             window.gl_swap_window();
-            drop(guard);
+            drop(buffer_guard);
         }
         Ok(())
     }
-    fn write_callback(input: &[f32], buffer: &Arc<Mutex<CircularBuffer<f32>>>) {
-        let mut buffer = buffer.lock().unwrap();
+    fn write_callback(
+        input: &[f32],
+        buffer: &Arc<Mutex<CircularBuffer<f32>>>,
+        analyzer: &Arc<Mutex<AudioAnalyzer>>,
+    ) {
+        let (mut buffer, mut analyzer) = (buffer.lock().unwrap(), analyzer.lock().unwrap());
+        analyzer.add_samples(input);
         (0..input.len()).for_each(|i| {
             let _ = buffer.push_back(input[i]);
         });
@@ -417,7 +424,7 @@ impl App {
         current_stream: &mut Option<Stream>,
         devices: &mut Vec<Device>,
         device_number: i32,
-        audio_analyzer: &mut Option<AudioAnalyzer>,
+        audio_analyzer: &Arc<Mutex<AudioAnalyzer>>,
         sample_buffer: &Arc<Mutex<CircularBuffer<f32>>>,
     ) -> anyhow::Result<()> {
         if current_stream.is_none() {
@@ -432,22 +439,26 @@ impl App {
             } else {
                 let config = config.unwrap().with_max_sample_rate().config();
                 let cloned_arc = sample_buffer.clone();
+                let analyzer_arc = audio_analyzer.clone();
                 let stream = device.build_input_stream(
                     &config,
                     move |a, _| {
-                        Self::write_callback(a, &cloned_arc);
+                        Self::write_callback(a, &cloned_arc, &analyzer_arc);
                     },
-                    move |a| {},
+                    move |_| {},
                     None,
                 )?;
-                *audio_analyzer = Some(AudioAnalyzer::new(
+                let new_analyzer = AudioAnalyzer::new(
+                    config.sample_rate.0,
                     1024 * 50,
-                    config.sample_rate.0 as usize,
                     3,
                     3,
                     440,
                     crate::audio_analysis::WindowType::Hann,
-                ));
+                );
+
+                *audio_analyzer.lock().unwrap() = new_analyzer;
+
                 println!("sample rate: {:?}", config.sample_rate);
                 stream.play()?;
                 *current_stream = Some(stream);

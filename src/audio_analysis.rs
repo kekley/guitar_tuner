@@ -155,29 +155,23 @@ impl AudioAnalyzer {
             .collect::<Box<[f32]>>()
     }
 
-    fn apply_window_to_buffer(&mut self) {
-        self.buffer
-            .iter_mut()
-            .zip(&self.window)
-            .for_each(|(sample, window_sample)| {
-                *sample *= *window_sample;
-            });
-    }
-
-    fn copy_buffer_to_padded(&mut self) {
+    fn make_complex_padded(&mut self) {
+        let len = self.buffer.len();
         self.buffer
             .iter()
+            .zip(self.window.iter())
             .zip(self.padded_buffer.iter_mut())
-            .for_each(|(src, dest)| {
-                *dest = *src;
+            .for_each(|((sample, window_value), dest)| *dest = sample * window_value);
+        self.padded_buffer
+            .iter_mut()
+            .skip(len)
+            .for_each(|should_be_zero| {
+                *should_be_zero = 0.0;
             });
     }
 
     pub fn find_tone(&mut self) -> Note {
-        self.buffer.make_contiguous();
-        self.apply_window_to_buffer();
-        self.copy_buffer_to_padded();
-
+        self.make_complex_padded();
         let mut fft = FFT::new(&self.padded_buffer, crate::dft::TransformType::Forward);
         let mut result = fft
             .transform(false)
@@ -207,15 +201,21 @@ impl AudioAnalyzer {
                 });
             });
         }); */
-        freq_table[0..half_data.len()]
-            .iter()
-            .enumerate()
-            .for_each(|(i, freq)| {
-                if *freq < 60.0 {
-                    half_data[i] = 0.0
-                }
-            });
-
+        for (i, freq) in freq_table.iter().enumerate() {
+            if *freq > 60.0 {
+                half_data[..i - 1].iter_mut().for_each(|f| *f = 0.0);
+                break;
+            }
+        }
+        /* freq_table[0..half_data.len()]
+                   .iter()
+                   .enumerate()
+                   .for_each(|(i, freq)| {
+                       if *freq < 60.0 {
+                           half_data[i] = 0.0
+                       }
+                   });
+        */
         let loudest_tone_index = half_data
             .iter()
             .enumerate()
@@ -224,7 +224,6 @@ impl AudioAnalyzer {
             .unwrap();
 
         let loudest_freq = (freq_table[loudest_tone_index] * 100.0).round() / 100.0;
-        println!("{}", loudest_freq);
         let note = Note::from_frequency(loudest_freq);
         note
     }
