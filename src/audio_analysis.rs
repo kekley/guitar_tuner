@@ -137,7 +137,7 @@ impl AudioAnalyzer {
         });
     }
 
-    fn build_hamming_window(size: usize) -> Box<[f32]> {
+    pub fn build_hamming_window(size: usize) -> Box<[f32]> {
         (0..size)
             .map(|i| {
                 let val = 0.54 - 0.46 * (2.0 * PI * i as f32 / size as f32).cos();
@@ -146,10 +146,10 @@ impl AudioAnalyzer {
             .collect::<Box<[f32]>>()
     }
 
-    fn build_hann_window(size: usize) -> Box<[f32]> {
+    pub fn build_hann_window(size: usize) -> Box<[f32]> {
         (0..size)
             .map(|i| {
-                let val = 0.5 * (1.0 - (2.0 * PI * i as f32 / (size as f32 - 1.0))).cos();
+                let val = 0.5 * (1.0 - (2.0 * PI * i as f32 / (size as f32 - 1.0)).cos());
                 val
             })
             .collect::<Box<[f32]>>()
@@ -181,41 +181,18 @@ impl AudioAnalyzer {
         let half_len = result.len() / 2;
         let half_data = &mut result[0..half_len];
 
-        let copy = half_data.to_owned();
         let freq_table = FFT::freq_table(
             (half_data.len() * 2).try_into().unwrap(),
             1.0 / self.sample_rate as f32,
         );
-        for i in 2..=self.hps_count {
-            let hps_len = half_data.len() / i; // or equivalent rounding
-            for k in 0..hps_len {
-                half_data[k] *= copy[k * i];
-            }
-        }
 
-        /*         (2..self.hps_count + 1).for_each(|i: usize| {
-            let hps_len = half_data.len().div_ceil(i);
-            half_data[0..hps_len].iter_mut().for_each(|value| {
-                copy.iter().step_by(i).for_each(|factor| {
-                    *value *= factor;
-                });
-            });
-        }); */
         for (i, freq) in freq_table.iter().enumerate() {
             if *freq > 60.0 {
                 half_data[..i - 1].iter_mut().for_each(|f| *f = 0.0);
                 break;
             }
         }
-        /* freq_table[0..half_data.len()]
-                   .iter()
-                   .enumerate()
-                   .for_each(|(i, freq)| {
-                       if *freq < 60.0 {
-                           half_data[i] = 0.0
-                       }
-                   });
-        */
+
         let loudest_tone_index = half_data
             .iter()
             .enumerate()

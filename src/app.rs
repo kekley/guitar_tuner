@@ -1,5 +1,6 @@
 use std::{
     fmt::Debug,
+    io::Cursor,
     ops::Deref,
     sync::{Arc, Mutex},
     time::Duration,
@@ -17,13 +18,16 @@ use imgui_glow_renderer::{
     AutoRenderer,
 };
 use imgui_sdl2_support::SdlPlatform;
+use num_complex::ComplexFloat;
 use sdl2::{
     event::{self, Event, WindowEvent},
     video::{gl_attr::GLAttr, GLContext, Window},
     EventPump, Sdl, VideoSubsystem,
 };
 
-use crate::{audio_analysis::AudioAnalyzer, circular_buffer::CircularBuffer};
+use crate::{
+    audio_analysis::AudioAnalyzer, circular_buffer::CircularBuffer, fft::FFT, wav::WavFile,
+};
 
 pub const DEFAULT_WINDOW_TITLE: &str = "dodge left dodge right";
 pub const DEFAULT_WIDTH: usize = 800;
@@ -293,9 +297,9 @@ impl App {
             imgui_platform.prepare_frame(&mut imgui_context, &window, &event_pump);
 
             let ui = imgui_context.new_frame();
-            let mut buffer_guard = sample_buffer.lock().unwrap();
+            let buffer_guard = sample_buffer.lock().unwrap();
             let mut analyzer_guard = audio_analyzer.lock().unwrap();
-            let sample_data = buffer_guard.make_contiguous();
+            let sample_data = buffer_guard.iter().cloned().collect::<Box<[f32]>>();
 
             ///////////////////////////////////////////////
             //ui code  goes here
@@ -308,6 +312,7 @@ impl App {
                 context.window_size_x as f32,
                 context.window_size_y as f32,
             );
+
             ui.window("Note Analysis").build(|| {
                 ui.text(analyzer_guard.find_tone().to_str());
             });
@@ -344,20 +349,16 @@ impl App {
             .window("Sample Graph")
             .resizable(true)
             .movable(true)
-            .position(
-                [window_size_x / 2.0, window_size_y / 2.0],
-                imgui::Condition::FirstUseEver,
-            )
+            .position([0.0, 0.0], imgui::Condition::FirstUseEver)
             .size(
-                [window_size_x / 2.0, window_size_y / 2.0],
+                [window_size_x, window_size_y],
                 imgui::Condition::FirstUseEver,
             )
             .build(|| {
                 let plot = ui
                     .plot_lines("Sample Data:", &samples)
-                    .scale_max(0.5)
-                    .scale_min(-0.5)
-                    .graph_size([window_size_x / 2.0, window_size_y / 4.0]);
+                    .scale_max(5000000.0)
+                    .graph_size([window_size_x, window_size_y]);
                 plot.build();
             });
     }
