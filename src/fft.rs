@@ -9,7 +9,7 @@ pub struct FFT {
     direction: TransformType,
 }
 
-fn lower_power_of_two(n: usize) -> usize {
+pub fn lower_power_of_two(n: usize) -> usize {
     if !((n & (n - 1)) != 0) {
         return n;
     } else {

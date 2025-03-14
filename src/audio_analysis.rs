@@ -8,7 +8,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{circular_buffer::CircularBuffer, fft::FFT, wav::WavFile};
+use crate::{
+    circular_buffer::CircularBuffer,
+    fft::{lower_power_of_two, FFT},
+    wav::WavFile,
+};
 pub const NOTE_NAMES: [&'static str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
@@ -101,6 +105,7 @@ pub struct AudioAnalyzer {
     hps_count: usize,
     a4_freq: u32,
     sample_rate: u32,
+    result_buffer: Box<[f32]>,
 }
 pub enum WindowType {
     Hamming,
@@ -110,12 +115,15 @@ pub enum WindowType {
 impl AudioAnalyzer {
     pub fn new(
         sample_rate: u32,
-        buffer_size: usize,
+        mut buffer_size: usize,
         hps_count: usize,
         zero_padding_factor: usize,
         a4_freq: u32,
         window_type: WindowType,
     ) -> Self {
+        if !buffer_size.is_power_of_two() {
+            buffer_size = lower_power_of_two(buffer_size);
+        }
         let window = match window_type {
             WindowType::Hamming => Self::build_hamming_window(buffer_size),
             WindowType::Hann => Self::build_hann_window(buffer_size),
@@ -124,10 +132,12 @@ impl AudioAnalyzer {
         Self {
             window,
             buffer: CircularBuffer::new(buffer_size),
-            padded_buffer: vec![0.0; buffer_size * zero_padding_factor].into_boxed_slice(),
+            padded_buffer: vec![0.0; buffer_size * 1 + zero_padding_factor].into_boxed_slice(),
             a4_freq,
             hps_count,
             sample_rate,
+            result_buffer: vec![0.0; lower_power_of_two(buffer_size * 1 + zero_padding_factor) / 2]
+                .into_boxed_slice(),
         }
     }
 
@@ -185,7 +195,16 @@ impl AudioAnalyzer {
             (half_data.len() * 2).try_into().unwrap(),
             1.0 / self.sample_rate as f32,
         );
-
+        let copy = half_data.iter().cloned().collect::<Box<_>>();
+        for i in 2..=self.hps_count {
+            let hps_len = half_len.div_ceil(i);
+            half_data
+                .iter_mut()
+                .zip(copy.iter().step_by(hps_len))
+                .for_each(|(a, b)| {
+                    *a *= b;
+                });
+        }
         for (i, freq) in freq_table.iter().enumerate() {
             if *freq > 60.0 {
                 half_data[..i - 1].iter_mut().for_each(|f| *f = 0.0);
@@ -202,7 +221,14 @@ impl AudioAnalyzer {
 
         let loudest_freq = (freq_table[loudest_tone_index] * 100.0).round() / 100.0;
         let note = Note::from_frequency(loudest_freq);
+        self.result_buffer
+            .iter_mut()
+            .zip(half_data.iter())
+            .for_each(|(a, b)| *a = *b);
         note
+    }
+    pub fn get_result_buffer(&self) -> &[f32] {
+        &self.result_buffer
     }
 }
 

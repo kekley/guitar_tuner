@@ -231,7 +231,7 @@ impl App {
         AppBuilder::default()
     }
 
-    pub fn run(mut self) -> anyhow::Result<()> {
+    pub fn run(self) -> anyhow::Result<()> {
         let mut context = AppContext::new(&self);
         let App {
             mut sdl,
@@ -295,27 +295,25 @@ impl App {
                 if swap_succeeded.is_err() {}
             }
             imgui_platform.prepare_frame(&mut imgui_context, &window, &event_pump);
-
             let ui = imgui_context.new_frame();
             let buffer_guard = sample_buffer.lock().unwrap();
             let mut analyzer_guard = audio_analyzer.lock().unwrap();
             let sample_data = buffer_guard.iter().cloned().collect::<Box<[f32]>>();
-
             ///////////////////////////////////////////////
             //ui code  goes here
             if Self::draw_device_list(&mut context, &ui) {
                 context.current_stream = None;
             }
-            Self::draw_sample_graph(
-                &sample_data,
-                &ui,
-                context.window_size_x as f32,
-                context.window_size_y as f32,
-            );
 
             ui.window("Note Analysis").build(|| {
                 ui.text(analyzer_guard.find_tone().to_str());
             });
+            Self::draw_sample_graph(
+                &analyzer_guard.get_result_buffer(),
+                &ui,
+                context.window_size_x as f32,
+                context.window_size_y as f32,
+            );
             //////////////////////////////////////////////
             let draw_data = imgui_context.render();
 
@@ -345,6 +343,10 @@ impl App {
     }
 
     fn draw_sample_graph(samples: &[f32], ui: &Ui, window_size_x: f32, window_size_y: f32) {
+        let max_value = samples
+            .iter()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap();
         let _ = ui
             .window("Sample Graph")
             .resizable(true)
@@ -357,7 +359,7 @@ impl App {
             .build(|| {
                 let plot = ui
                     .plot_lines("Sample Data:", &samples)
-                    .scale_max(5000000.0)
+                    .scale_max(*max_value)
                     .graph_size([window_size_x, window_size_y]);
                 plot.build();
             });
@@ -453,7 +455,7 @@ impl App {
                     config.sample_rate.0,
                     1024 * 50,
                     3,
-                    3,
+                    1,
                     440,
                     crate::audio_analysis::WindowType::Hann,
                 );
@@ -467,9 +469,4 @@ impl App {
         }
         Ok(())
     }
-}
-
-#[test]
-fn arena_size_calc() {
-    println!("Device Size: {}", size_of::<Device>())
 }
