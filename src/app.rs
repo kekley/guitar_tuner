@@ -1,5 +1,7 @@
 use std::{
-    fmt::Debug,
+    fmt::{format, Debug},
+    io::Cursor,
+    ops::{Deref, Range},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -7,8 +9,7 @@ use std::{
 use anyhow::{anyhow, Error, Ok};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BufferSize, Device, FromSample, Host, Sample, SampleFormat, SampleRate, Stream, StreamConfig,
-    ALL_HOSTS,
+    BufferSize, Device, FromSample, Host, Sample, SampleFormat, Stream, StreamConfig, ALL_HOSTS,
 };
 use imgui::{Context, Ui};
 use imgui_glow_renderer::{
@@ -16,13 +17,28 @@ use imgui_glow_renderer::{
     AutoRenderer,
 };
 use imgui_sdl2_support::SdlPlatform;
+use num_complex::ComplexFloat;
+use plotters::{
+    chart::ChartBuilder,
+    prelude::{BitMapBackend, IntoDrawingArea},
+    series::LineSeries,
+    style::{
+        full_palette::{BLACK, RED_700},
+        Color, WHITE,
+    },
+};
 use sdl2::{
     event::{self, Event, WindowEvent},
     video::{gl_attr::GLAttr, GLContext, Window},
     EventPump, Sdl, VideoSubsystem,
 };
 
-use crate::circular_buffer::CircularBuffer;
+use crate::{
+    audio_analysis::{find_max_float, AudioAnalyzer, Note},
+    circular_buffer::CircularBuffer,
+    fft::FFT,
+    wav::WavFile,
+};
 
 pub const DEFAULT_WINDOW_TITLE: &str = "dodge left dodge right";
 pub const DEFAULT_WIDTH: usize = 800;
@@ -148,7 +164,7 @@ impl AppBuilder {
         let (imgui_context, imgui_platform, imgui_renderer) = init_imgui(glow_context)?;
 
         let event_pump = sdl.event_pump().map_err(|error| anyhow!(error))?;
-
+        let audio_host = cpal::default_host();
         let app = App {
             sdl,
             video_subsystem,
@@ -158,22 +174,67 @@ impl AppBuilder {
             imgui_platform,
             imgui_renderer,
             event_pump,
+            audio_host,
+            sample_buffer: Arc::new(Mutex::new(CircularBuffer::new(2048))),
+            audio_analyzer: Arc::new(Mutex::new(AudioAnalyzer::new(
+                48000,
+                1024 * 50,
+                3,
+                3,
+                440,
+                crate::audio_analysis::WindowType::Hann,
+            ))),
         };
 
         Ok(app)
     }
 }
 
+/*         let mut window_size_x = window_size_x as f32;
+       let mut window_size_y = window_size_y as f32;
+       let mut device_number: i32 = 0;
+       let mut current_stream: Option<Stream> = None;
+       let mut device_list: Vec<Device> = vec![];
+       let mut device_names: Vec<Box<str>> = vec![];
+       let mut need_device_refresh = true;
+       let mut sample_buffer = Arc::new(Mutex::new(CircularBuffer::<f32>::new(BUFFER_SIZE)));
+*/
+struct AppContext {
+    window_size_x: u32,
+    window_size_y: u32,
+    device_number: i32,
+    current_stream: Option<Stream>,
+    device_list: Vec<Device>,
+    device_names: Vec<String>,
+    need_device_refresh: bool,
+}
+
+impl AppContext {
+    fn new(app: &App) -> Self {
+        let size = app.window.size();
+        Self {
+            window_size_x: size.0,
+            window_size_y: size.1,
+            device_number: 0,
+            current_stream: None,
+            device_list: vec![],
+            device_names: vec![],
+            need_device_refresh: true,
+        }
+    }
+}
 pub struct App {
     sdl: Sdl,
     video_subsystem: VideoSubsystem,
-
     window: Window,
     gl_context: GLContext,
     imgui_context: imgui::Context,
     imgui_platform: SdlPlatform,
     imgui_renderer: AutoRenderer,
     event_pump: EventPump,
+    audio_host: Host,
+    sample_buffer: Arc<Mutex<CircularBuffer<f32>>>,
+    audio_analyzer: Arc<Mutex<AudioAnalyzer>>,
 }
 
 impl App {
@@ -181,7 +242,8 @@ impl App {
         AppBuilder::default()
     }
 
-    pub fn run(mut self) -> anyhow::Result<()> {
+    pub fn run(self) -> anyhow::Result<()> {
+        let mut context = AppContext::new(&self);
         let App {
             mut sdl,
             mut video_subsystem,
@@ -191,19 +253,13 @@ impl App {
             mut imgui_platform,
             mut imgui_renderer,
             mut event_pump,
+            audio_host,
+            sample_buffer,
+            audio_analyzer,
         } = self;
-
-        let (window_size_x, window_size_y) = window.size();
-        let host = cpal::default_host();
-        let mut window_size_x = window_size_x as f32;
-        let mut window_size_y = window_size_y as f32;
-        let mut device_number: i32 = 0;
-        let mut current_stream: Option<Stream> = None;
-        let mut device_list: Vec<Device> = vec![];
-        let mut device_names: Vec<Box<str>> = vec![];
-        let mut need_device_refresh = true;
-        let mut sample_buffer = Arc::new(Mutex::new(CircularBuffer::<f32>::new(BUFFER_SIZE)));
-
+        let mut tone_hit_counter = 0;
+        let mut nearest_note_num_buffer: f32 = 0.0;
+        let mut note_number_counter = 0;
         'main: loop {
             for event in event_pump.poll_iter() {
                 //event passed to imgui
@@ -213,10 +269,10 @@ impl App {
                     break 'main;
                 }
                 if let Event::AudioDeviceAdded { .. } = event {
-                    need_device_refresh = true;
+                    context.need_device_refresh = true;
                 }
                 if let Event::AudioDeviceRemoved { .. } = event {
-                    need_device_refresh = true;
+                    context.need_device_refresh = true;
                 }
 
                 if let Event::Window {
@@ -227,44 +283,92 @@ impl App {
                 {
                     match win_event {
                         WindowEvent::SizeChanged(x, y) => {
-                            window_size_x = x as f32;
-                            window_size_y = y as f32;
+                            context.window_size_x = x as u32;
+                            context.window_size_y = y as u32;
                         }
                         _ => {}
                     }
                 }
             }
-            if need_device_refresh {
-                Self::refresh_device_list(&host, &mut device_list, &mut device_names);
-            }
-            if current_stream.is_none() {
-                let swap_succeeded = Self::swap_device(
-                    &mut current_stream,
-                    &mut device_list,
-                    device_number,
-                    &mut sample_buffer,
+            if context.need_device_refresh {
+                Self::refresh_device_list(
+                    &audio_host,
+                    &mut context.device_list,
+                    &mut context.device_names,
                 );
-                if swap_succeeded.is_err() {}
             }
-            imgui_platform.prepare_frame(&mut imgui_context, &window, &event_pump);
+            if context.current_stream.is_none() {
+                let swap_succeeded = Self::swap_device(
+                    &mut context.current_stream,
+                    &mut context.device_list,
+                    context.device_number,
+                    &audio_analyzer,
+                    &sample_buffer,
+                );
+                if swap_succeeded.is_err() {
+                    println!("fuck")
+                }
+            }
 
+            imgui_platform.prepare_frame(&mut imgui_context, &window, &event_pump);
             let ui = imgui_context.new_frame();
-            let mut guard = sample_buffer.lock().unwrap();
-            let sample_data = guard.make_contiguous();
+            let mut analyzer_guard = audio_analyzer.lock().unwrap();
+            let mut buffer_guard = sample_buffer.lock().unwrap();
+            let sample_data = buffer_guard
+                .make_contiguous()
+                .iter()
+                .cloned()
+                .collect::<Box<_>>();
+
+            let strongest_freq = analyzer_guard.strongest_freq();
+            drop(analyzer_guard);
+            drop(buffer_guard);
+            let number = Note::freq_to_number(strongest_freq, 440);
+
+            let nearest_note_number = number.round();
+            let nearest_freq = Note::number_to_freq(nearest_note_number, 440);
+
+            let freq_difference = nearest_freq - strongest_freq;
+
+            let semitone_step = nearest_freq - Note::number_to_freq((number - 1.0).round(), 440);
+
+            let mut diff_cents = if semitone_step == 0.0 {
+                0.0
+            } else {
+                (freq_difference / semitone_step) * 100.0
+            };
+            if nearest_note_number != nearest_note_num_buffer {
+                note_number_counter += 1;
+                if note_number_counter >= 7 {
+                    nearest_note_num_buffer = nearest_note_number;
+                    note_number_counter = 0;
+                }
+            }
+
+            diff_cents = ((diff_cents * 10.0).round()) / 10.0;
+
             ///////////////////////////////////////////////
             //ui code  goes here
-            if Self::draw_device_list(
-                &device_names,
-                ui,
-                &mut device_number,
-                window_size_x,
-                window_size_y,
-            ) {
-                current_stream = None;
-            }
-            Self::draw_sample_graph(&sample_data, &ui, window_size_x, window_size_y);
-            //////////////////////////////////////////////
 
+            Self::draw_sample_graph(
+                &sample_data,
+                &ui,
+                context.window_size_x as f32,
+                context.window_size_y as f32,
+            );
+            Self::draw_note_data(
+                ui,
+                context.window_size_x as f32,
+                context.window_size_y as f32,
+                nearest_note_num_buffer,
+                diff_cents,
+            );
+            if Self::draw_device_list(&mut context, &ui) {
+                context.current_stream.unwrap().pause()?;
+                context.current_stream = None;
+            }
+
+            //////////////////////////////////////////////
             let draw_data = imgui_context.render();
 
             unsafe {
@@ -276,20 +380,87 @@ impl App {
                 .map_err(|error| anyhow!(error))?;
 
             window.gl_swap_window();
-            drop(guard);
         }
         Ok(())
     }
-    fn write_callback(input: &[f32], buffer: &Arc<Mutex<CircularBuffer<f32>>>) {
-        let mut buffer = buffer.lock().unwrap();
+    fn write_callback(
+        input: &[f32],
+        buffer: &Arc<Mutex<CircularBuffer<f32>>>,
+        analyzer: &Arc<Mutex<AudioAnalyzer>>,
+    ) {
+        let (mut buffer, mut analyzer) = (buffer.lock().unwrap(), analyzer.lock().unwrap());
         (0..input.len()).for_each(|i| {
             let _ = buffer.push_back(input[i]);
         });
+        if buffer.len() >= 1024 {
+            analyzer.add_samples(&buffer.drain(0..1024).collect::<Box<_>>());
+        }
+    }
+
+    pub fn save_chart(data: &[f32]) {
+        let (ind, max) = find_max_float(data);
+        let root = BitMapBackend::new("../plot.png", (1920, 1080)).into_drawing_area();
+        root.fill(&WHITE).unwrap();
+        let mut chart = ChartBuilder::on(&root)
+            .build_cartesian_2d(0f32..data.len() as f32, 0.0f32..*max)
+            .unwrap();
+
+        chart.configure_mesh().draw().unwrap();
+
+        let iter = (0..data.len())
+            .zip(data.iter())
+            .map(|(x, y)| (x as f32, *y));
+        chart
+            .draw_series(LineSeries::new(iter, &plotters::style::RED))
+            .unwrap();
+
+        chart
+            .configure_series_labels()
+            .background_style(WHITE.mix(0.8))
+            .border_style(BLACK)
+            .draw()
+            .unwrap();
+
+        root.present().unwrap();
     }
 
     fn draw_sample_graph(samples: &[f32], ui: &Ui, window_size_x: f32, window_size_y: f32) {
         let _ = ui
-            .window("Sample Graph")
+            .window("Audio Samples")
+            .resizable(true)
+            .movable(true)
+            .position([window_size_x / 2.0, 0.0], imgui::Condition::FirstUseEver)
+            .size(
+                [window_size_x / 2.0, window_size_y / 2.0],
+                imgui::Condition::FirstUseEver,
+            )
+            .build(|| {
+                let plot = ui
+                    .plot_lines("Sample Data:", &samples)
+                    .scale_max(1.0)
+                    .scale_min(-1.0)
+                    .graph_size([
+                        (window_size_x / 2.0) - window_size_x * 0.1,
+                        (window_size_y / 2.0) - window_size_x * 0.1,
+                    ]);
+                plot.build();
+            });
+    }
+
+    fn draw_note_data(
+        ui: &Ui,
+        window_size_x: f32,
+        window_size_y: f32,
+        nearest_note: f32,
+        diff_cents: f32,
+    ) {
+        let diff_cents = if diff_cents >= 0.0 {
+            format!("-{}", diff_cents)
+        } else {
+            format!("{}", diff_cents)
+        };
+        let _ = ui
+            .window("Note Data:")
             .resizable(true)
             .movable(true)
             .position(
@@ -301,20 +472,16 @@ impl App {
                 imgui::Condition::FirstUseEver,
             )
             .build(|| {
-                let plot = ui
-                    .plot_lines("Sample Data:", &samples)
-                    .scale_max(0.5)
-                    .scale_min(-0.5)
-                    .graph_size([window_size_x / 2.0, window_size_y / 4.0]);
-                plot.build();
+                ui.text(format!(
+                    "Nearest Note: {}\nNearest Note Number: {}\nDifference in cents: {}",
+                    Note::from_frequency(Note::number_to_freq(nearest_note, 440)).to_str(),
+                    nearest_note,
+                    diff_cents
+                ));
             });
     }
 
-    fn refresh_device_list(
-        host: &Host,
-        devices: &mut Vec<Device>,
-        device_names: &mut Vec<Box<str>>,
-    ) {
+    fn refresh_device_list(host: &Host, devices: &mut Vec<Device>, device_names: &mut Vec<String>) {
         devices.clear();
         device_names.clear();
         for (device_num, device) in host
@@ -324,45 +491,49 @@ impl App {
         {
             let device_name = device
                 .name()
-                .unwrap_or(format!("Unnamed Device {}", device_num))
-                .into_boxed_str();
+                .unwrap_or(format!("Unnamed Device {}", device_num));
             device_names.push(device_name);
             devices.push(device);
         }
     }
     //returns true if we need to switch audio devices
-    fn draw_device_list(
-        device_names: &[Box<str>],
-        ui: &Ui,
-        device_number: &mut i32,
-        window_size_x: f32,
-        window_size_y: f32,
-    ) -> bool {
+    fn draw_device_list(context: &mut AppContext, ui: &Ui) -> bool {
         ui.window("Input Devices")
             .size(
-                [window_size_x / 2.0, window_size_y / 2.0],
+                [
+                    context.window_size_x as f32 / 2.0,
+                    context.window_size_y as f32 / 2.0,
+                ],
                 imgui::Condition::FirstUseEver,
             )
             .resizable(true)
             .movable(true)
             .position([0.0, 0.0], imgui::Condition::FirstUseEver)
             .build(|| -> bool {
-                let old_device_num = *device_number;
+                let old_device_num = context.device_number;
                 const NULL_STR: &str = "";
                 let mut refs = [NULL_STR; 20];
                 let mut len: usize = 0;
-                device_names.iter().enumerate().for_each(|(i, name)| {
-                    let ref_slot = refs.get_mut(i);
-                    match ref_slot {
-                        Some(slot) => {
-                            *slot = name.as_ref();
-                            len += 1;
+                context
+                    .device_names
+                    .iter()
+                    .enumerate()
+                    .for_each(|(i, name)| {
+                        let ref_slot = refs.get_mut(i);
+                        match ref_slot {
+                            Some(slot) => {
+                                *slot = name.as_ref();
+                                len += 1;
+                            }
+                            None => {}
                         }
-                        None => {}
-                    }
-                });
-                if ui.list_box("list box", device_number, &refs[0..len], 7)
-                    && old_device_num != *device_number
+                    });
+                if ui.list_box(
+                    "Input Devices",
+                    &mut context.device_number,
+                    &refs[0..len],
+                    7,
+                ) && old_device_num != context.device_number
                 {
                     return true;
                 } else {
@@ -376,6 +547,7 @@ impl App {
         current_stream: &mut Option<Stream>,
         devices: &mut Vec<Device>,
         device_number: i32,
+        audio_analyzer: &Arc<Mutex<AudioAnalyzer>>,
         sample_buffer: &Arc<Mutex<CircularBuffer<f32>>>,
     ) -> anyhow::Result<()> {
         if current_stream.is_none() {
@@ -390,14 +562,28 @@ impl App {
             } else {
                 let config = config.unwrap().with_max_sample_rate().config();
                 let cloned_arc = sample_buffer.clone();
+                let analyzer_arc = audio_analyzer.clone();
                 let stream = device.build_input_stream(
                     &config,
                     move |a, _| {
-                        Self::write_callback(a, &cloned_arc);
+                        Self::write_callback(a, &cloned_arc, &analyzer_arc);
                     },
-                    move |a| {},
+                    move |_| {},
                     None,
                 )?;
+                let mut audio_analyzer = audio_analyzer.lock().unwrap();
+                let mut sample_buffer = sample_buffer.lock().unwrap();
+                let new_analyzer = AudioAnalyzer::new(
+                    config.sample_rate.0,
+                    1024 * 50,
+                    3,
+                    3,
+                    440,
+                    crate::audio_analysis::WindowType::Hann,
+                );
+
+                *audio_analyzer = new_analyzer;
+
                 println!("sample rate: {:?}", config.sample_rate);
                 stream.play()?;
                 *current_stream = Some(stream);

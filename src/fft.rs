@@ -9,7 +9,7 @@ pub struct FFT {
     direction: TransformType,
 }
 
-fn lower_power_of_two(n: usize) -> usize {
+pub fn lower_power_of_two(n: usize) -> usize {
     if !((n & (n - 1)) != 0) {
         return n;
     } else {
@@ -105,6 +105,7 @@ impl FFT {
             target |= mask;
         });
     }
+
     fn scale(data: &mut [Complex<f32>]) {
         let factor = 1.0 / data.len() as f32;
         data.iter_mut().for_each(|data| *data *= factor);
@@ -112,9 +113,9 @@ impl FFT {
     pub fn freq_table(n: u32, scalar: f32) -> Box<[f32]> {
         let val = 1.0 / (n as f32 * scalar);
 
-        let half_n = (n - 1) / 2 + 1;
-        let p1 = 0..half_n as i32;
-        let p2 = -(n as i32) / 2..0;
+        let n_c = (n - 1) / 2 + 1;
+        let p1 = 0..n_c as i32;
+        let p2 = -((n / 2) as i32)..0;
         let result = p1.chain(p2).map(|x| x as f32 * val).collect::<Box<[f32]>>();
         result
     }
@@ -150,6 +151,15 @@ fn fft() {
     println!("bucket 88: {}", norm_sqr[88]);
     println!("bucket 40: {}", norm_sqr[40]);
     println!("bucket 1: {}", norm_sqr[1]);
+    let len = norm_sqr.len();
+    for i in 0..len {
+        let freq = if i <= len / 2 {
+            (i as f32) * (sample_rate / len as f32)
+        } else {
+            -((len - i) as f32) * (sample_rate / len as f32)
+        };
+        println!("Index: {}, Frequency: {}", i, freq);
+    }
 }
 
 #[test]

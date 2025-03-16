@@ -1,15 +1,19 @@
 use std::{
     fmt, iter,
     mem::{self, MaybeUninit},
+    ops::RangeBounds,
     ptr,
 };
 
-use crate::iter::{IntoIter, Iter, IterMut};
+use crate::{
+    drain::Drain,
+    iter::{IntoIter, Iter, IterMut},
+};
 
 pub struct CircularBuffer<T: Sized> {
-    size: usize,
-    start: usize,
-    items: Box<[MaybeUninit<T>]>,
+    pub(crate) size: usize,
+    pub(crate) start: usize,
+    pub(crate) items: Box<[MaybeUninit<T>]>,
 }
 
 impl<T: Clone> Clone for CircularBuffer<T> {
@@ -68,6 +72,13 @@ impl<T> CircularBuffer<T> {
 
         // SAFETY: The elements in these slices are guaranteed to be initialized
         unsafe { (slice_assume_init_mut(front), slice_assume_init_mut(back)) }
+    }
+    #[inline]
+    pub fn drain<R>(&mut self, range: R) -> Drain<'_, T>
+    where
+        R: RangeBounds<usize>,
+    {
+        Drain::over_range(self, range)
     }
 
     pub fn as_slices(&self) -> (&[T], &[T]) {
@@ -326,7 +337,7 @@ unsafe fn slice_assume_init_mut<T>(slice: &mut [MaybeUninit<T>]) -> &mut [T] {
     &mut *(slice as *mut [MaybeUninit<T>] as *mut [T])
 }
 #[inline]
-const fn add_mod(x: usize, y: usize, m: usize) -> usize {
+pub const fn add_mod(x: usize, y: usize, m: usize) -> usize {
     debug_assert!(m > 0);
     debug_assert!(x <= m);
     debug_assert!(y <= m);
@@ -335,7 +346,7 @@ const fn add_mod(x: usize, y: usize, m: usize) -> usize {
 }
 
 #[inline]
-const fn sub_mod(x: usize, y: usize, m: usize) -> usize {
+pub const fn sub_mod(x: usize, y: usize, m: usize) -> usize {
     debug_assert!(m > 0);
     debug_assert!(x <= m);
     debug_assert!(y <= m);
