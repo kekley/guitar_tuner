@@ -50,8 +50,14 @@ pub enum Note {
 }
 
 impl Note {
-    pub fn number_to_freq(number: u32, a4_freq: u32) -> f32 {
-        a4_freq as f32 * 2.0.powf((number - 69) as f32 / 12.0)
+    pub fn number_to_freq(number: f32, a4_freq: u32) -> f32 {
+        a4_freq as f32 * 2.0.powf((number - 69.0) as f32 / 12.0)
+    }
+    pub fn freq_to_number(frequency: f32, a4_freq: u32) -> f32 {
+        if frequency == 0.0 || !frequency.is_normal() {
+            return 0.0;
+        }
+        return 12.0 * (frequency / a4_freq as f32).log2() + 69.0;
     }
     pub fn to_str(&self) -> &'static str {
         match self {
@@ -70,7 +76,7 @@ impl Note {
             Note::INVALID => "ZENIS",
         }
     }
-    fn from_frequency(frequency: f32) -> Note {
+    pub fn from_frequency(frequency: f32) -> Note {
         if frequency == 0.0 {
             return Note::INVALID;
         }
@@ -115,29 +121,30 @@ pub enum WindowType {
 impl AudioAnalyzer {
     pub fn new(
         sample_rate: u32,
-        mut buffer_size: usize,
+        buffer_size: usize,
         hps_count: usize,
         zero_padding_factor: usize,
         a4_freq: u32,
         window_type: WindowType,
     ) -> Self {
-        if !buffer_size.is_power_of_two() {
-            buffer_size = lower_power_of_two(buffer_size);
-        }
         let window = match window_type {
-            WindowType::Hamming => Self::build_hamming_window(buffer_size),
-            WindowType::Hann => Self::build_hann_window(buffer_size),
+            WindowType::Hamming => Self::build_hamming_window(lower_power_of_two(buffer_size)),
+            WindowType::Hann => Self::build_hann_window(lower_power_of_two(buffer_size)),
         };
 
         Self {
             window,
-            buffer: CircularBuffer::new(buffer_size),
-            padded_buffer: vec![0.0; buffer_size * 1 + zero_padding_factor].into_boxed_slice(),
+            buffer: CircularBuffer::new(lower_power_of_two(buffer_size)),
+            padded_buffer: vec![0.0; lower_power_of_two(buffer_size * (1 + zero_padding_factor))]
+                .into_boxed_slice(),
             a4_freq,
             hps_count,
             sample_rate,
-            result_buffer: vec![0.0; lower_power_of_two(buffer_size * 1 + zero_padding_factor) / 2]
-                .into_boxed_slice(),
+            result_buffer: vec![
+                0.0;
+                lower_power_of_two(buffer_size * (1 + zero_padding_factor)) / 2
+            ]
+            .into_boxed_slice(),
         }
     }
 
@@ -165,7 +172,7 @@ impl AudioAnalyzer {
             .collect::<Box<[f32]>>()
     }
 
-    fn make_complex_padded(&mut self) {
+    fn copy_to_zero_padded_buffer(&mut self) {
         let len = self.buffer.len();
         self.buffer
             .iter()
@@ -179,35 +186,41 @@ impl AudioAnalyzer {
                 *should_be_zero = 0.0;
             });
     }
+    pub fn apply_harmonic_product_spectrum(count: usize, buffer: &mut [f32]) {
+        let copy = buffer.iter().cloned().collect::<Box<_>>();
 
-    pub fn find_tone(&mut self) -> Note {
-        self.make_complex_padded();
+        for i in 2..=count {
+            let hps_len = buffer.len().div_ceil(i);
+            buffer[..hps_len]
+                .iter_mut()
+                .zip(copy.iter().step_by(i))
+                .for_each(|(a, b)| {
+                    *a *= b;
+                });
+        }
+    }
+
+    pub fn strongest_freq(&mut self) -> f32 {
+        self.copy_to_zero_padded_buffer();
         let mut fft = FFT::new(&self.padded_buffer, crate::dft::TransformType::Forward);
         let mut result = fft
             .transform(false)
             .iter_mut()
             .map(|f| f.abs())
             .collect::<Box<[f32]>>();
-        let half_len = result.len() / 2;
-        let half_data = &mut result[0..half_len];
 
         let freq_table = FFT::freq_table(
-            (half_data.len() * 2).try_into().unwrap(),
+            ((result.len()) as u32).try_into().unwrap(),
             1.0 / self.sample_rate as f32,
         );
-        let copy = half_data.iter().cloned().collect::<Box<_>>();
-        for i in 2..=self.hps_count {
-            let hps_len = half_len.div_ceil(i);
-            half_data
-                .iter_mut()
-                .zip(copy.iter().step_by(hps_len))
-                .for_each(|(a, b)| {
-                    *a *= b;
-                });
-        }
+
+        let half_len = result.len() / 2;
+        let half_data = &mut result[0..half_len];
+        Self::apply_harmonic_product_spectrum(self.hps_count, half_data);
+
         for (i, freq) in freq_table.iter().enumerate() {
             if *freq > 60.0 {
-                half_data[..i - 1].iter_mut().for_each(|f| *f = 0.0);
+                half_data[..i].iter_mut().for_each(|f| *f = 0.0);
                 break;
             }
         }
@@ -220,18 +233,20 @@ impl AudioAnalyzer {
             .unwrap();
 
         let loudest_freq = (freq_table[loudest_tone_index] * 100.0).round() / 100.0;
-        let note = Note::from_frequency(loudest_freq);
-        self.result_buffer
-            .iter_mut()
-            .zip(half_data.iter())
-            .for_each(|(a, b)| *a = *b);
-        note
+
+        self.result_buffer.copy_from_slice(&half_data);
+        loudest_freq
     }
     pub fn get_result_buffer(&self) -> &[f32] {
         &self.result_buffer
     }
 }
-
+pub fn find_max_float(data: &[f32]) -> (usize, &f32) {
+    data.iter()
+        .enumerate()
+        .max_by(|(i_a, a), (i_b, b)| a.total_cmp(b))
+        .expect("The data slice is empty")
+}
 #[test]
 fn test_analysis() {
     let bytes = include_bytes!(".././A.wav");
@@ -241,15 +256,15 @@ fn test_analysis() {
     let mut analyzer = AudioAnalyzer::new(
         SampleRate::KHz48.to_u32(),
         1024 * 50,
-        3,
+        0,
         3,
         440,
         WindowType::Hann,
     );
 
     analyzer.add_samples(wav.get_samples());
-    let a = analyzer.find_tone();
-    assert_eq!(a, Note::A);
+    let a = analyzer.strongest_freq();
+    assert_eq!(Note::from_frequency(a), Note::A);
     let bytes = include_bytes!(".././A_RECORDING.wav");
     let mut cursor = Cursor::new(bytes);
     let wav = WavFile::from_bytes(&mut cursor).unwrap();
@@ -264,8 +279,8 @@ fn test_analysis() {
     );
 
     analyzer.add_samples(wav.get_samples());
-    let a = analyzer.find_tone();
-    assert_eq!(a, Note::A);
+    let a = analyzer.strongest_freq();
+    assert_eq!(Note::from_frequency(a), Note::A);
     let bytes = include_bytes!(".././B.wav");
     let mut cursor = Cursor::new(bytes);
     let wav = WavFile::from_bytes(&mut cursor).unwrap();
@@ -273,20 +288,20 @@ fn test_analysis() {
     let mut analyzer = AudioAnalyzer::new(
         SampleRate::KHz48.to_u32(),
         1024 * 50,
-        3,
+        0,
         3,
         440,
         WindowType::Hann,
     );
 
     analyzer.add_samples(wav.get_samples());
-    let b = analyzer.find_tone();
-    assert_eq!(b, Note::B);
+    let b = analyzer.strongest_freq();
+    assert_eq!(Note::from_frequency(b), Note::B);
 }
 
 #[test]
 fn test_note_to_str() {
-    let freq = Note::number_to_freq(69, 440);
+    let freq = Note::number_to_freq(69.0, 440);
     let note = Note::from_frequency(freq).to_str();
     assert_eq!(freq, 440.0);
     assert_eq!(note, "A");
